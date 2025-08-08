@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Firebase Auth Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        .section { margin: 20px 0; padding: 20px; border: 1px solid #ddd; border-radius: 5px; }
+        button { padding: 10px 20px; margin: 5px; background: #007bff; color: white; border: none; border-radius: 3px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        .response { background: #f8f9fa; padding: 10px; border-radius: 3px; margin-top: 10px; white-space: pre-wrap; }
+        .error { background: #f8d7da; color: #721c24; }
+        .success { background: #d4edda; color: #155724; }
+        input { padding: 8px; margin: 5px; width: 300px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔐 Firebase Authentication Test</h1>
+        
+        <div class="section">
+            <h3>1. Firebase Configuration</h3>
+            <p>Make sure you have Firebase initialized in your project with the correct config.</p>
+            <div id="firebase-status">Firebase not initialized</div>
+        </div>
+
+        <div class="section">
+            <h3>2. Authentication</h3>
+            <input type="email" id="email" placeholder="Email" value="test@example.com">
+            <input type="password" id="password" placeholder="Password" value="password123">
+            <br>
+            <button onclick="signUp()">Sign Up</button>
+            <button onclick="signIn()">Sign In</button>
+            <button onclick="signOut()">Sign Out</button>
+            <div id="auth-status">Not authenticated</div>
+        </div>
+
+        <div class="section">
+            <h3>3. API Testing</h3>
+            <button onclick="testPublicEndpoint()">Test Public Endpoint (/health)</button>
+            <button onclick="testAuthEndpoint()">Test Auth Endpoint (/auth/me)</button>
+            <button onclick="testProtectedEndpoint()">Test Protected Endpoint (/users)</button>
+            <div id="api-response" class="response"></div>
+        </div>
+
+        <div class="section">
+            <h3>4. Token Information</h3>
+            <button onclick="showToken()">Show Current Token</button>
+            <div id="token-info" class="response"></div>
+        </div>
+    </div>
+
+    <!-- Firebase SDK -->
+    <script type="module">
+        // Import Firebase modules
+        import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js';
+        import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js';
+
+        // Your Firebase config - REPLACE WITH YOUR ACTUAL CONFIG
+        const firebaseConfig = {
+            apiKey: "your-api-key",
+            authDomain: "your-project.firebaseapp.com",
+            projectId: "kynora-24540",
+            storageBucket: "your-project.appspot.com",
+            messagingSenderId: "your-sender-id",
+            appId: "your-app-id"
+        };
+
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+
+        // Global variables
+        window.auth = auth;
+        window.currentUser = null;
+        window.currentToken = null;
+
+        // Update Firebase status
+        document.getElementById('firebase-status').textContent = 'Firebase initialized successfully';
+        document.getElementById('firebase-status').className = 'success';
+
+        // Auth state listener
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                window.currentUser = user;
+                const token = await user.getIdToken();
+                window.currentToken = token;
+                document.getElementById('auth-status').textContent = `Authenticated as: ${user.email}`;
+                document.getElementById('auth-status').className = 'success';
+            } else {
+                window.currentUser = null;
+                window.currentToken = null;
+                document.getElementById('auth-status').textContent = 'Not authenticated';
+                document.getElementById('auth-status').className = 'error';
+            }
+        });
+
+        // Global functions
+        window.signUp = async () => {
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            
+            try {
+                const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+                console.log('User created:', userCredential.user);
+            } catch (error) {
+                console.error('Sign up error:', error);
+                alert('Sign up failed: ' + error.message);
+            }
+        };
+
+        window.signIn = async () => {
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            
+            try {
+                const userCredential = await signInWithEmailAndPassword(auth, email, password);
+                console.log('User signed in:', userCredential.user);
+            } catch (error) {
+                console.error('Sign in error:', error);
+                alert('Sign in failed: ' + error.message);
+            }
+        };
+
+        window.signOut = async () => {
+            try {
+                await signOut(auth);
+                console.log('User signed out');
+            } catch (error) {
+                console.error('Sign out error:', error);
+            }
+        };
+
+        window.testPublicEndpoint = async () => {
+            try {
+                const response = await fetch('http://localhost:8000/health');
+                const data = await response.json();
+                document.getElementById('api-response').textContent = JSON.stringify(data, null, 2);
+                document.getElementById('api-response').className = 'response success';
+            } catch (error) {
+                document.getElementById('api-response').textContent = 'Error: ' + error.message;
+                document.getElementById('api-response').className = 'response error';
+            }
+        };
+
+        window.testAuthEndpoint = async () => {
+            if (!window.currentToken) {
+                document.getElementById('api-response').textContent = 'Please sign in first';
+                document.getElementById('api-response').className = 'response error';
+                return;
+            }
+
+            try {
+                const response = await fetch('http://localhost:8000/auth/me', {
+                    headers: {
+                        'Authorization': `Bearer ${window.currentToken}`
+                    }
+                });
+                const data = await response.json();
+                document.getElementById('api-response').textContent = JSON.stringify(data, null, 2);
+                document.getElementById('api-response').className = response.ok ? 'response success' : 'response error';
+            } catch (error) {
+                document.getElementById('api-response').textContent = 'Error: ' + error.message;
+                document.getElementById('api-response').className = 'response error';
+            }
+        };
+
+        window.testProtectedEndpoint = async () => {
+            if (!window.currentToken) {
+                document.getElementById('api-response').textContent = 'Please sign in first';
+                document.getElementById('api-response').className = 'response error';
+                return;
+            }
+
+            try {
+                const response = await fetch('http://localhost:8000/users?role=buyer&limit=5', {
+                    headers: {
+                        'Authorization': `Bearer ${window.currentToken}`
+                    }
+                });
+                const data = await response.json();
+                document.getElementById('api-response').textContent = JSON.stringify(data, null, 2);
+                document.getElementById('api-response').className = response.ok ? 'response success' : 'response error';
+            } catch (error) {
+                document.getElementById('api-response').textContent = 'Error: ' + error.message;
+                document.getElementById('api-response').className = 'response error';
+            }
+        };
+
+        window.showToken = () => {
+            if (window.currentToken) {
+                document.getElementById('token-info').textContent = window.currentToken;
+                document.getElementById('token-info').className = 'response';
+            } else {
+                document.getElementById('token-info').textContent = 'No token available. Please sign in.';
+                document.getElementById('token-info').className = 'response error';
+            }
+        };
+    </script>
+</body>
+</html>
