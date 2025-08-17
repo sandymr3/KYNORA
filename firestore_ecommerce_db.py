@@ -26,10 +26,12 @@ class FirestoreEcommerceDB:
     """
     
     def __init__(self, project_id: str = None):
-        """Initialize Firestore client"""
+        """Initialize Firestore client using Firebase Admin SDK"""
         try:
-            self.db = firestore.Client(project=project_id)
-            logger.info("Firestore client initialized successfully")
+            # Use the already initialized Firebase Admin SDK
+            from firebase_admin import firestore as admin_firestore
+            self.db = admin_firestore.client()
+            logger.info("Firestore client initialized successfully using Firebase Admin SDK")
         except Exception as e:
             logger.error(f"Failed to initialize Firestore client: {e}")
             raise
