@@ -157,19 +157,12 @@ async def get_current_user(authorization: str = Header(None)):
                 detail="User account is deactivated"
             )
         
-        # Return user info in the format expected by the API
+        # Return user info in the format expected by the frontend
         return {
-            "user_id": uid,
+            "id": uid,
             "email": user_data.get('email', ''),
             "name": user_data.get('displayName', ''),
-            "role": user_data.get('role', 'buyer'),
-            "phone": user_data.get('phone', ''),
-            "address": user_data.get('address', {}),
-            "preferences": user_data.get('preferences', {}),
-            "photo_url": user_data.get('photoURL', ''),
-            "is_active": user_data.get('isActive', True),
-            "created_at": user_data.get('createdAt'),
-            "last_login_at": user_data.get('lastLoginAt')
+            "role": user_data.get('role', 'customer')
         }
         
     except auth.InvalidIdTokenError:
@@ -359,11 +352,7 @@ async def get_current_user_profile(
     current_user = Depends(get_current_user)
 ):
     """Get the current authenticated user's profile"""
-    return {
-        "success": True,
-        "data": current_user,
-        "message": "User profile retrieved successfully"
-    }
+    return current_user
 
 @app.post("/auth/test", response_model=Dict[str, Any], summary="Test authentication")
 async def test_authentication(
@@ -374,7 +363,7 @@ async def test_authentication(
         "success": True,
         "message": "Authentication successful",
         "user": {
-            "user_id": current_user["user_id"],
+            "id": current_user["id"],
             "email": current_user["email"],
             "role": current_user["role"]
         }
@@ -402,7 +391,7 @@ async def get_user(
 ):
     """Get user profile by ID"""
     # TODO: Add authorization - users can only access their own profile unless admin
-    if current_user['user_id'] != user_id and current_user['role'] != 'admin':
+    if current_user['id'] != user_id and current_user['role'] != 'admin':
         raise HTTPException(status_code=403, detail="Access denied")
     
     result = db.get_user_profile(user_id)
@@ -419,7 +408,7 @@ async def update_user(
 ):
     """Update user profile"""
     # TODO: Add authorization - users can only update their own profile
-    if current_user['user_id'] != user_id and current_user['role'] != 'admin':
+    if current_user['id'] != user_id and current_user['role'] != 'admin':
         raise HTTPException(status_code=403, detail="Access denied")
     
     result = db.update_user_profile(user_id, user_data.dict(exclude_unset=True))
@@ -643,7 +632,7 @@ async def get_user_orders(
 ):
     """Get all orders for a user"""
     # TODO: Add authorization - users can only access their own orders
-    if current_user['user_id'] != user_id and current_user['role'] != 'admin':
+    if current_user['id'] != user_id and current_user['role'] != 'admin':
         raise HTTPException(status_code=403, detail="Access denied")
     
     result = db.get_user_orders(user_id, limit, last_doc_id)
@@ -708,7 +697,7 @@ async def add_order_timeline_event(
 ):
     """Add a timeline event to an order"""
     # TODO: Add authorization - seller or admin only
-    result = db.add_order_timeline_event(order_id, event, details, current_user['user_id'])
+    result = db.add_order_timeline_event(order_id, event, details, current_user['id'])
     if not result['success']:
         raise HTTPException(status_code=400, detail=result['error'])
     return result
@@ -903,7 +892,7 @@ async def initialize_cart(
 ):
     """Initialize a cart for a user"""
     # TODO: Add authorization - users can only initialize their own cart
-    if current_user['user_id'] != user_id and current_user['role'] != 'admin':
+    if current_user['id'] != user_id and current_user['role'] != 'admin':
         raise HTTPException(status_code=403, detail="Access denied")
     
     result = db.initialize_cart(user_id)
@@ -920,7 +909,7 @@ async def add_item_to_cart(
 ):
     """Add an item to cart"""
     # TODO: Add authorization - users can only modify their own cart
-    if current_user['user_id'] != user_id:
+    if current_user['id'] != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
     
     result = db.add_item_to_cart(user_id, item_data.dict())
@@ -938,7 +927,7 @@ async def remove_item_from_cart(
 ):
     """Remove an item from cart"""
     # TODO: Add authorization - users can only modify their own cart
-    if current_user['user_id'] != user_id:
+    if current_user['id'] != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
     
     result = db.remove_item_from_cart(user_id, product_id, variant_id)
@@ -956,7 +945,7 @@ async def update_cart_item(
 ):
     """Update quantity or variant of a cart item"""
     # TODO: Add authorization - users can only modify their own cart
-    if current_user['user_id'] != user_id:
+    if current_user['id'] != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
     
     result = db.update_cart_item(user_id, product_id, update_data.dict(exclude_unset=True))
@@ -972,7 +961,7 @@ async def get_user_cart(
 ):
     """Get cart for a user"""
     # TODO: Add authorization - users can only access their own cart
-    if current_user['user_id'] != user_id:
+    if current_user['id'] != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
     
     result = db.get_user_cart(user_id)
@@ -988,7 +977,7 @@ async def clear_cart(
 ):
     """Clear/empty cart"""
     # TODO: Add authorization - users can only clear their own cart
-    if current_user['user_id'] != user_id:
+    if current_user['id'] != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
     
     result = db.clear_cart(user_id)
@@ -1035,7 +1024,7 @@ async def get_user_reviews(
 ):
     """Get reviews by user"""
     # TODO: Add authorization - users can only access their own reviews
-    if current_user['user_id'] != user_id and current_user['role'] != 'admin':
+    if current_user['id'] != user_id and current_user['role'] != 'admin':
         raise HTTPException(status_code=403, detail="Access denied")
     
     result = db.get_user_reviews(user_id, limit, last_doc_id)
@@ -1052,7 +1041,7 @@ async def update_review(
 ):
     """Update a review"""
     # TODO: Add authorization - users can only update their own reviews within time limit
-    result = db.update_review(review_id, review_data.dict(exclude_unset=True), current_user['user_id'])
+    result = db.update_review(review_id, review_data.dict(exclude_unset=True), current_user['id'])
     if not result['success']:
         raise HTTPException(status_code=400, detail=result['error'])
     return result
@@ -1068,7 +1057,7 @@ async def moderate_review(
     result = db.moderate_review(
         review_id, 
         moderation_data.action, 
-        admin_user['user_id'], 
+        admin_user['id'], 
         moderation_data.notes
     )
     if not result['success']:
@@ -1104,7 +1093,7 @@ async def get_user_notifications(
 ):
     """Get notifications for a user"""
     # TODO: Add authorization - users can only access their own notifications
-    if current_user['user_id'] != user_id:
+    if current_user['id'] != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
     
     result = db.get_user_notifications(user_id, unread_only, limit, last_doc_id)
@@ -1120,7 +1109,7 @@ async def mark_notification_read(
 ):
     """Mark notification as read"""
     # TODO: Add authorization - users can only mark their own notifications as read
-    result = db.mark_notification_read(notification_id, current_user['user_id'])
+    result = db.mark_notification_read(notification_id, current_user['id'])
     if not result['success']:
         raise HTTPException(status_code=400, detail=result['error'])
     return result
@@ -1194,7 +1183,7 @@ async def get_dashboard_stats(
 ):
     """Get dashboard statistics"""
     # TODO: Add authorization - admin can see all stats, sellers can see only their stats
-    if seller_id and current_user['role'] not in ['admin'] and current_user['user_id'] != seller_id:
+    if seller_id and current_user['role'] not in ['admin'] and current_user['id'] != seller_id:
         raise HTTPException(status_code=403, detail="Access denied")
     
     result = db.get_dashboard_stats(seller_id)
@@ -1212,7 +1201,7 @@ async def get_sales_stats(
 ):
     """Get sales statistics for a seller"""
     # TODO: Add authorization - sellers can only see their own stats, admin can see any seller's stats
-    if current_user['role'] != 'admin' and current_user['user_id'] != seller_id:
+    if current_user['role'] != 'admin' and current_user['id'] != seller_id:
         raise HTTPException(status_code=403, detail="Access denied")
     
     result = db.get_sales_stats(seller_id, start_date, end_date)
