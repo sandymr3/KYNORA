@@ -33,7 +33,15 @@ uvicorn fastapi_ecommerce_server:app --reload --host 0.0.0.0 --port 8000
 #### `GET /auth/me`
 **Description**: Get current authenticated user's profile  
 **Security**: Requires Firebase ID token  
-**Response**: User profile data including role, preferences, and account details
+**Response**: User profile data with id, email, name, and role
+```json
+{
+  "id": "string",
+  "email": "string", 
+  "name": "string",
+  "role": "admin" | "seller" | "customer"
+}
+```
 
 #### `POST /auth/test`
 **Description**: Test authentication functionality  
@@ -496,7 +504,7 @@ Ensure all Firebase configuration variables are set in production:
 
 ## 📝 API Response Format
 
-All endpoints return responses in a consistent format:
+Most endpoints return responses in a consistent format:
 
 ### Success Response
 ```json
@@ -505,6 +513,17 @@ All endpoints return responses in a consistent format:
   "data": { ... },
   "message": "Operation successful",
   "timestamp": "2024-01-01T00:00:00.000Z"
+}
+```
+
+### Authentication Endpoint (`/auth/me`)
+Returns user data directly:
+```json
+{
+  "id": "user123",
+  "email": "user@example.com",
+  "name": "John Doe",
+  "role": "customer"
 }
 ```
 
