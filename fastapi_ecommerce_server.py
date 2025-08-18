@@ -111,44 +111,61 @@ async def get_current_user(authorization: str = Header(None)):
         decoded_token = auth.verify_id_token(token)
         uid = decoded_token['uid']
         
-        # Get user data from Firestore
+        # Get user data from Firestore by UID
         user_doc = firestore_client.collection('users').document(uid).get()
         
         if not user_doc.exists:
-            # If user doesn't exist in Firestore, create a basic profile
-            user_data = {
-                'uid': uid,
-                'email': decoded_token.get('email', ''),
-                'displayName': decoded_token.get('name', ''),
-                'photoURL': decoded_token.get('picture', ''),
-                'role': 'buyer',  # Default role
-                'phone': decoded_token.get('phone_number', ''),
-                'address': {},
-                'preferences': {
-                    'currency': 'INR',
-                    'language': 'en',
-                    'notifications': {
-                        'email': True,
-                        'sms': True,
-                        'push': True
-                    }
-                },
-                'createdAt': datetime.now(),
-                'updatedAt': datetime.now(),
-                'isActive': True,
-                'lastLoginAt': datetime.now()
-            }
+            # Check if user exists by email first
+            email = decoded_token.get('email', '')
+            existing_user_query = firestore_client.collection('users').where('email', '==', email).limit(1).get()
             
-            # Create user document in Firestore
-            firestore_client.collection('users').document(uid).set(user_data)
-            logger.info(f"Created new user profile for UID: {uid}")
+            if existing_user_query:
+                # User exists with this email, update their UID
+                existing_user_doc = existing_user_query[0]
+                user_data = existing_user_doc.to_dict()
+                
+                # Update the existing user document with the new UID
+                firestore_client.collection('users').document(uid).set(user_data)
+                # Delete the old document if it has a different ID
+                if existing_user_doc.id != uid:
+                    firestore_client.collection('users').document(existing_user_doc.id).delete()
+                
+                logger.info(f"Linked existing user {email} to UID: {uid}")
+            else:
+                # Create new user with default customer role
+                user_data = {
+                    'uid': uid,
+                    'email': email,
+                    'displayName': decoded_token.get('name', ''),
+                    'photoURL': decoded_token.get('picture', ''),
+                    'role': 'customer',  # Default role for new users
+                    'phone': decoded_token.get('phone_number', ''),
+                    'address': {},
+                    'preferences': {
+                        'currency': 'INR',
+                        'language': 'en',
+                        'notifications': {
+                            'email': True,
+                            'sms': True,
+                            'push': True
+                        }
+                    },
+                    'createdAt': datetime.now(),
+                    'updatedAt': datetime.now(),
+                    'isActive': True,
+                    'lastLoginAt': datetime.now()
+                }
+                
+                # Create user document in Firestore
+                firestore_client.collection('users').document(uid).set(user_data)
+                logger.info(f"Created new user profile for UID: {uid}")
         else:
             user_data = user_doc.to_dict()
-            
-            # Update last login time
-            firestore_client.collection('users').document(uid).update({
-                'lastLoginAt': datetime.now()
-            })
+        
+        # Update last login time
+        firestore_client.collection('users').document(uid).update({
+            'lastLoginAt': datetime.now()
+        })
         
         # Check if user is active
         if not user_data.get('isActive', True):
@@ -377,7 +394,20 @@ async def create_user(
     db: FirestoreEcommerceDB = Depends(get_db)
 ):
     """Create a new user profile"""
-    # TODO: Add authentication check - users should only create their own profile
+    # Check if user already exists by email
+    existing_user_query = firestore_client.collection('users').where('email', '==', user_data.email).limit(1).get()
+    
+    if existing_user_query:
+        # User already exists, return existing user info
+        existing_user_doc = existing_user_query[0]
+        return {
+            "success": True,
+            "message": "User already exists",
+            "user_id": existing_user_doc.id,
+            "data": existing_user_doc.to_dict()
+        }
+    
+    # Create new user if doesn't exist
     result = db.create_user_profile(user_data.dict())
     if not result['success']:
         raise HTTPException(status_code=400, detail=result['error'])
