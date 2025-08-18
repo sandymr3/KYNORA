@@ -162,7 +162,7 @@ async def get_current_user(authorization: str = Header(None)):
             "id": uid,
             "email": user_data.get('email', ''),
             "name": user_data.get('displayName', ''),
-            "role": user_data.get('role', 'admin')
+            "role": user_data.get('role', 'customer')
         }
         
     except auth.InvalidIdTokenError:
