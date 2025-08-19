@@ -8,6 +8,7 @@ Run with: uvicorn main:app --reload --host 0.0.0.0 --port 8000
 from fastapi import FastAPI, HTTPException, Depends, Query, Path, Body, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Any, Union
 from datetime import datetime, timedelta
@@ -71,11 +72,36 @@ app = FastAPI(
 # CORS middleware for Next.js frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "https://yourdomain.com"],  # Add your frontend URLs
+    allow_origins=["http://localhost:3000", "https://kynora.onrender.com", "https://kynora.onrender.com/docs"],  # Add your frontend URLs
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Custom OpenAPI schema to add global authorization
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    openapi_schema["components"]["securitySchemes"] = {
+        "BearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT",
+        }
+    }
+    for path in openapi_schema["paths"].values():
+        for operation in path.values():
+            operation["security"] = [{"BearerAuth": []}]
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
 
 # Dependency to get database instance
 def get_db() -> FirestoreEcommerceDB:
