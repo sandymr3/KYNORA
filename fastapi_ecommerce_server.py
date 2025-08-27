@@ -78,7 +78,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Custom OpenAPI schema with selective authorization
+# Custom OpenAPI schema to add global authorization
 def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
@@ -95,24 +95,9 @@ def custom_openapi():
             "bearerFormat": "JWT",
         }
     }
-    
-    # Public endpoints that don't require authentication
-    public_endpoints = [
-        "/products/featured",
-        "/products/active", 
-        "/products/search",
-        "/products/popular",
-        "/products/{product_id}",
-        "/categories",
-        "/health"
-    ]
-    
-    # Add authentication requirement only to non-public endpoints
-    for path, path_item in openapi_schema["paths"].items():
-        for operation in path_item.values():
-            if not any(public_path in path for public_path in public_endpoints):
-                operation["security"] = [{"BearerAuth": []}]
-    
+    for path in openapi_schema["paths"].values():
+        for operation in path.values():
+            operation["security"] = [{"BearerAuth": []}]
     app.openapi_schema = openapi_schema
     return app.openapi_schema
 
@@ -531,25 +516,28 @@ async def add_product(
         raise HTTPException(status_code=400, detail=result['error'])
     return result
 
-@app.get("/products/active", response_model=Dict[str, Any], summary="Get active products")
-async def get_active_products(
-    limit: int = Query(20, description="Number of products to return"),
-    last_doc_id: Optional[str] = Query(None, description="Last document ID for pagination"),
+@app.get("/products/{product_id}", response_model=Dict[str, Any], summary="Get product by ID")
+async def get_product(
+    product_id: str = Path(..., description="Product ID"),
+    increment_view: bool = Query(True, description="Whether to increment view count"),
     db: FirestoreEcommerceDB = Depends(get_db)
 ):
-    """Get all active products"""
-    result = db.get_active_products(limit, last_doc_id)
+    """Get product details by ID"""
+    result = db.get_product(product_id, increment_view)
     if not result['success']:
-        raise HTTPException(status_code=400, detail=result['error'])
+        raise HTTPException(status_code=404, detail=result['error'])
     return result
 
-@app.get("/products/featured", response_model=Dict[str, Any], summary="Get featured products")
-async def get_featured_products(
-    limit: int = Query(10, description="Number of featured products to return"),
-    db: FirestoreEcommerceDB = Depends(get_db)
+@app.put("/products/{product_id}", response_model=Dict[str, Any], summary="Update product")
+async def update_product(
+    product_id: str = Path(..., description="Product ID"),
+    product_data: ProductUpdate = Body(...),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(get_current_user)
 ):
-    """Get featured products - Public access"""
-    result = db.get_featured_products(limit)
+    """Update product details"""
+    # TODO: Add authorization - only product owner or admin
+    result = db.update_product(product_id, product_data.dict(exclude_unset=True))
     if not result['success']:
         raise HTTPException(status_code=400, detail=result['error'])
     return result
@@ -586,28 +574,25 @@ async def get_products(
         raise HTTPException(status_code=400, detail=result['error'])
     return result
 
-@app.get("/products/{product_id}", response_model=Dict[str, Any], summary="Get product by ID")
-async def get_product(
-    product_id: str = Path(..., description="Product ID"),
-    increment_view: bool = Query(True, description="Whether to increment view count"),
+@app.get("/products/active", response_model=Dict[str, Any], summary="Get active products")
+async def get_active_products(
+    limit: int = Query(20, description="Number of products to return"),
+    last_doc_id: Optional[str] = Query(None, description="Last document ID for pagination"),
     db: FirestoreEcommerceDB = Depends(get_db)
 ):
-    """Get product details by ID"""
-    result = db.get_product(product_id, increment_view)
+    """Get all active products"""
+    result = db.get_active_products(limit, last_doc_id)
     if not result['success']:
-        raise HTTPException(status_code=404, detail=result['error'])
+        raise HTTPException(status_code=400, detail=result['error'])
     return result
 
-@app.put("/products/{product_id}", response_model=Dict[str, Any], summary="Update product")
-async def update_product(
-    product_id: str = Path(..., description="Product ID"),
-    product_data: ProductUpdate = Body(...),
-    db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+@app.get("/products/featured", response_model=Dict[str, Any], summary="Get featured products")
+async def get_featured_products(
+    limit: int = Query(10, description="Number of featured products to return"),
+    db: FirestoreEcommerceDB = Depends(get_db)
 ):
-    """Update product details"""
-    # TODO: Add authorization - only product owner or admin
-    result = db.update_product(product_id, product_data.dict(exclude_unset=True))
+    """Get featured products"""
+    result = db.get_featured_products(limit)
     if not result['success']:
         raise HTTPException(status_code=400, detail=result['error'])
     return result
@@ -1297,11 +1282,6 @@ async def get_low_stock_alerts(
     return result
 
 # ==================== UTILITY ENDPOINTS ====================
-
-@app.get("/favicon.ico")
-async def favicon():
-    """Handle favicon requests"""
-    return JSONResponse(status_code=204, content=None)
 
 @app.post("/batch-operations", response_model=Dict[str, Any], summary="Batch operations")
 async def batch_operation(

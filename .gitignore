@@ -2,9 +2,6 @@
 .env
 .env.local
 .env.*.local
-.env.production
-.env.development
-.env.test
 
 # Python
 __pycache__/
@@ -28,14 +25,14 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
+test.py
+test
 
 # Virtual environments
 venv/
 env/
 ENV/
-.venv/
-.virtualenv/
-pipenv/
+.venv
 
 # IDE
 .vscode/
@@ -43,9 +40,6 @@ pipenv/
 *.swp
 *.swo
 *~
-.spyderproject
-.spyproject
-.ropeproject
 
 # OS
 .DS_Store
@@ -56,25 +50,17 @@ pipenv/
 ehthumbs.db
 Thumbs.db
 
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+
 # Firebase/Service accounts
 serviceAccount.json
 *kynora*.json
 *firebase*.json
-firebase-adminsdk-*.json
-.firebase/
-.firebaserc
-firebase.json
-
-# FastAPI/Uvicorn
-*.pid
-celerybeat-schedule
-celerybeat.pid
-
-# Database
-*.db
-*.sqlite
-*.sqlite3
-db.sqlite3
 
 # Logs
 *.log
@@ -90,7 +76,10 @@ nosetests.xml
 coverage.xml
 *.cover
 .hypothesis/
-.cache/
+test_*.py
+test_*.html
+*_test.py
+*_test.html
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -102,22 +91,3 @@ coverage.xml
 .mypy_cache/
 .dmypy.json
 dmypy.json
-
-# Pyre type checker
-.pyre/
-
-# Temporary files
-*.tmp
-*.temp
-
-# Media/uploads
-uploads/
-media/
-static/uploads/
-
-# Documentation
-docs/_build/
-
-# Backup files
-*.bak
-*.backup
