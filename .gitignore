@@ -61,6 +61,9 @@ package-lock.json
 serviceAccount.json
 *kynora*.json
 *firebase*.json
+.firebaserc
+firebase.json
+runtime.txt
 
 # Logs
 *.log
