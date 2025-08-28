@@ -94,3 +94,5 @@ test_*.html
 .mypy_cache/
 .dmypy.json
 dmypy.json
+start_server.py
+
