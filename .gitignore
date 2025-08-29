@@ -83,6 +83,72 @@ test_*.py
 test_*.html
 *_test.py
 *_test.html
+.kiro
+frontend*
+gitignore_update*
+start_server.py
+
+# Test files and results (specific to this project)
+comprehensive_api_test.py
+comprehensive_backend_test.py
+comprehensive_test_summary.md
+debug_cart_operations.py
+final_database_verification.py
+final_integration_test_suite.py
+run_comprehensive_tests*.py
+run_final_integration_tests.py
+quick_test.py
+test_authentication.py
+test_database_*.py
+test_endpoints_*.py
+test_enhanced_error_handling.py
+test_firebase_auth_integration.py
+test_firestore_*.py
+test_optimizations_*.py
+test_optimized_endpoints.py
+test_performance_optimizations.py
+test_server.py
+test_transaction_consistency.py
+validate_firestore_indexes.py
+fix_database_operations.py
+
+# Test result files
+*_test_results_*.json
+test_results*.json
+final_integration_test_results_*.json
+consolidated_test_results_*.json
+endpoint_test_results_*.json
+firebase_auth_test_results_*.json
+database_test_results_*.json
+final_verification_results_*.json
+optimization_test_results*.json
+
+# Summary and documentation files (generated during testing)
+authentication_fixes_summary.md
+database_operations_fix_summary.md
+endpoint_testing_guide.md
+enhanced_error_handling_documentation.md
+performance_optimizations_summary.md
+task_*_summary.md
+firestore_index_optimization_summary.md
+firestore_index_docs.md
+firestore_index_documentation.md
+
+# Deployment and completion files
+deployment_checklist_and_setup_guide.md
+task_10_completion_summary.md
+
+# Additional test patterns
+*_fixed.py
+*_optimized.py
+api_usage_examples.py
+openapi_enhancements.py
+
+# Backup and temporary files
+*.bak
+*.tmp
+*_backup.*
+*_old.*
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -94,5 +160,4 @@ test_*.html
 .mypy_cache/
 .dmypy.json
 dmypy.json
-start_server.py
 

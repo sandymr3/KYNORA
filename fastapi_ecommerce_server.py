@@ -5,16 +5,20 @@ Converts FirestoreEcommerceDB class methods into RESTful API endpoints
 Run with: uvicorn main:app --reload --host 0.0.0.0 --port 8000
 """
 
-from fastapi import FastAPI, HTTPException, Depends, Query, Path, Body, Header
+from fastapi import FastAPI, HTTPException, Depends, Query, Path, Body, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel, Field
-from typing import Dict, List, Optional, Any, Union
+from typing import Dict, List, Optional, Any, Union, Tuple
 from datetime import datetime, timedelta
 import logging
 import os
 import dotenv
+import asyncio
+from functools import wraps
+import hashlib
+import json
 dotenv.load_dotenv()  # Load environment variables from .env file
 # Import your existing Firestore class
 from firestore_ecommerce_db import FirestoreEcommerceDB
@@ -56,9 +60,77 @@ firestore_client = firestore.client()
 
 
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# ==================== ENHANCED LOGGING CONFIGURATION ====================
+
+import sys
+from logging.handlers import RotatingFileHandler
+import traceback
+import uuid
+
+# Configure enhanced logging
+def setup_logging():
+    """Setup comprehensive logging configuration"""
+    
+    # Create formatters
+    detailed_formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(funcName)s() - %(message)s'
+    )
+    
+    simple_formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s'
+    )
+    
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    
+    # Clear existing handlers
+    root_logger.handlers.clear()
+    
+    # Console handler for development
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(simple_formatter)
+    root_logger.addHandler(console_handler)
+    
+    # File handler for production logs
+    try:
+        file_handler = RotatingFileHandler(
+            'logs/ecommerce_api.log',
+            maxBytes=10*1024*1024,  # 10MB
+            backupCount=5
+        )
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(detailed_formatter)
+        root_logger.addHandler(file_handler)
+    except (OSError, IOError):
+        # If logs directory doesn't exist or can't write, continue without file logging
+        pass
+    
+    # Error file handler for errors only
+    try:
+        error_handler = RotatingFileHandler(
+            'logs/ecommerce_errors.log',
+            maxBytes=5*1024*1024,  # 5MB
+            backupCount=3
+        )
+        error_handler.setLevel(logging.ERROR)
+        error_handler.setFormatter(detailed_formatter)
+        root_logger.addHandler(error_handler)
+    except (OSError, IOError):
+        # If logs directory doesn't exist or can't write, continue without error file logging
+        pass
+    
+    return root_logger
+
+# Setup logging
+logger = setup_logging()
+
+# Create specialized loggers
+auth_logger = logging.getLogger('auth')
+db_logger = logging.getLogger('database')
+api_logger = logging.getLogger('api')
+performance_logger = logging.getLogger('performance')
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -77,6 +149,350 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ==================== ENHANCED REQUEST/RESPONSE LOGGING MIDDLEWARE ====================
+
+@app.middleware("http")
+async def enhanced_logging_middleware(request, call_next):
+    """Enhanced request/response logging with detailed monitoring"""
+    
+    # Generate unique request ID for tracing
+    request_id = str(uuid.uuid4())[:8]
+    
+    # Start timing
+    start_time = datetime.utcnow()
+    
+    # Extract request details
+    client_ip = request.client.host if request.client else "unknown"
+    user_agent = request.headers.get('user-agent', 'Unknown')
+    content_length = request.headers.get('content-length', '0')
+    
+    # Log incoming request
+    api_logger.info(
+        f"[{request_id}] {request.method} {request.url.path} - "
+        f"IP: {client_ip} - UA: {user_agent[:50]}... - "
+        f"Content-Length: {content_length}"
+    )
+    
+    # Log query parameters if present
+    if request.url.query:
+        api_logger.debug(f"[{request_id}] Query params: {request.url.query}")
+    
+    # Log headers for debugging (excluding sensitive ones)
+    sensitive_headers = {'authorization', 'cookie', 'x-api-key'}
+    safe_headers = {
+        k: v for k, v in request.headers.items() 
+        if k.lower() not in sensitive_headers
+    }
+    api_logger.debug(f"[{request_id}] Headers: {safe_headers}")
+    
+    # Add request ID to request state for use in endpoints
+    request.state.request_id = request_id
+    
+    try:
+        # Process request
+        response = await call_next(request)
+        
+        # Calculate processing time
+        process_time = (datetime.utcnow() - start_time).total_seconds()
+        
+        # Log response details
+        response_size = response.headers.get('content-length', 'unknown')
+        
+        # Determine log level based on status code
+        if response.status_code >= 500:
+            log_level = logging.ERROR
+        elif response.status_code >= 400:
+            log_level = logging.WARNING
+        else:
+            log_level = logging.INFO
+        
+        api_logger.log(
+            log_level,
+            f"[{request_id}] Response: {response.status_code} - "
+            f"Time: {process_time:.3f}s - Size: {response_size} bytes"
+        )
+        
+        # Log slow requests
+        if process_time > 2.0:  # Requests taking more than 2 seconds
+            performance_logger.warning(
+                f"[{request_id}] Slow request: {request.method} {request.url.path} "
+                f"took {process_time:.3f}s"
+            )
+        
+        # Add headers for monitoring
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Process-Time"] = str(process_time)
+        
+        return response
+        
+    except Exception as e:
+        # Calculate processing time for failed requests
+        process_time = (datetime.utcnow() - start_time).total_seconds()
+        
+        # Log the exception
+        api_logger.error(
+            f"[{request_id}] Request failed: {request.method} {request.url.path} - "
+            f"Error: {str(e)} - Time: {process_time:.3f}s",
+            exc_info=True
+        )
+        
+        # Re-raise the exception to be handled by exception handlers
+        raise
+
+# Response compression middleware for large payloads
+from fastapi.middleware.gzip import GZipMiddleware
+app.add_middleware(GZipMiddleware, minimum_size=500)  # Compress responses > 500 bytes
+
+# Connection pooling and resource management
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import threading
+from functools import lru_cache
+
+class ConnectionPool:
+    """Connection pool for Firestore operations"""
+    
+    def __init__(self, max_connections: int = 10):
+        self.max_connections = max_connections
+        self.executor = ThreadPoolExecutor(max_workers=max_connections)
+        self._connections = {}
+        self._lock = threading.Lock()
+    
+    def get_connection(self, thread_id: int = None):
+        """Get or create a Firestore connection for the current thread"""
+        if thread_id is None:
+            thread_id = threading.get_ident()
+        
+        with self._lock:
+            if thread_id not in self._connections:
+                # Create new connection for this thread
+                from firebase_admin import firestore as admin_firestore
+                self._connections[thread_id] = admin_firestore.client()
+        
+        return self._connections[thread_id]
+    
+    async def execute_async(self, func, *args, **kwargs):
+        """Execute Firestore operation asynchronously"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self.executor, func, *args, **kwargs)
+    
+    def cleanup_connections(self):
+        """Clean up unused connections"""
+        with self._lock:
+            active_threads = {t.ident for t in threading.enumerate()}
+            inactive_connections = [
+                tid for tid in self._connections.keys() 
+                if tid not in active_threads
+            ]
+            for tid in inactive_connections:
+                del self._connections[tid]
+
+# Global connection pool
+connection_pool = ConnectionPool(max_connections=15)
+
+# Periodic cleanup task
+async def cleanup_connections_periodically():
+    """Clean up inactive connections every 5 minutes"""
+    while True:
+        await asyncio.sleep(300)  # 5 minutes
+        connection_pool.cleanup_connections()
+
+# Track startup time for performance monitoring
+startup_time = datetime.utcnow()
+
+# Start cleanup tasks
+@app.on_event("startup")
+async def startup_event():
+    global startup_time
+    startup_time = datetime.utcnow()
+    asyncio.create_task(cleanup_connections_periodically())
+    asyncio.create_task(cleanup_cache_periodically())
+    logger.info("Performance optimization services started")
+    logger.info(f"Server startup completed at {startup_time.isoformat()}")
+
+# ==================== CACHING SYSTEM ====================
+
+class EnhancedCache:
+    """Enhanced in-memory cache with TTL management and statistics"""
+    
+    def __init__(self, max_size: int = 1000):
+        self._cache = {}
+        self._timestamps = {}
+        self._access_count = {}
+        self._hit_count = 0
+        self._miss_count = 0
+        self.max_size = max_size
+        self._lock = threading.Lock()
+    
+    def _generate_key(self, endpoint: str, params: Dict[str, Any]) -> str:
+        """Generate cache key from endpoint and parameters"""
+        # Sort parameters for consistent key generation
+        sorted_params = json.dumps(params, sort_keys=True, default=str)
+        key_string = f"{endpoint}:{sorted_params}"
+        return hashlib.md5(key_string.encode()).hexdigest()
+    
+    def _evict_lru(self) -> None:
+        """Evict least recently used items when cache is full"""
+        if len(self._cache) >= self.max_size:
+            # Find least recently used key
+            lru_key = min(self._access_count.keys(), key=lambda k: self._access_count[k])
+            self._cache.pop(lru_key, None)
+            self._timestamps.pop(lru_key, None)
+            self._access_count.pop(lru_key, None)
+    
+    def get(self, endpoint: str, params: Dict[str, Any], ttl_seconds: int = 300) -> Optional[Any]:
+        """Get cached response if not expired"""
+        key = self._generate_key(endpoint, params)
+        
+        with self._lock:
+            if key in self._cache:
+                timestamp = self._timestamps.get(key, 0)
+                if datetime.utcnow().timestamp() - timestamp < ttl_seconds:
+                    # Update access count for LRU
+                    self._access_count[key] = datetime.utcnow().timestamp()
+                    self._hit_count += 1
+                    logger.debug(f"Cache hit for {endpoint}")
+                    return self._cache[key]
+                else:
+                    # Expired, remove from cache
+                    self._cache.pop(key, None)
+                    self._timestamps.pop(key, None)
+                    self._access_count.pop(key, None)
+            
+            self._miss_count += 1
+            return None
+    
+    def set(self, endpoint: str, params: Dict[str, Any], data: Any) -> None:
+        """Cache response data with LRU eviction"""
+        key = self._generate_key(endpoint, params)
+        
+        with self._lock:
+            # Evict if cache is full
+            self._evict_lru()
+            
+            # Store data
+            self._cache[key] = data
+            current_time = datetime.utcnow().timestamp()
+            self._timestamps[key] = current_time
+            self._access_count[key] = current_time
+            logger.debug(f"Cached response for {endpoint}")
+    
+    def clear(self, pattern: str = None) -> None:
+        """Clear cache entries matching pattern"""
+        with self._lock:
+            if pattern:
+                keys_to_remove = [key for key in self._cache.keys() if pattern in key]
+                for key in keys_to_remove:
+                    self._cache.pop(key, None)
+                    self._timestamps.pop(key, None)
+                    self._access_count.pop(key, None)
+            else:
+                self._cache.clear()
+                self._timestamps.clear()
+                self._access_count.clear()
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get cache statistics"""
+        total_requests = self._hit_count + self._miss_count
+        hit_rate = (self._hit_count / total_requests * 100) if total_requests > 0 else 0
+        
+        return {
+            "cache_size": len(self._cache),
+            "max_size": self.max_size,
+            "hit_count": self._hit_count,
+            "miss_count": self._miss_count,
+            "hit_rate_percent": round(hit_rate, 2),
+            "total_requests": total_requests
+        }
+    
+    def cleanup_expired(self, default_ttl: int = 300) -> int:
+        """Clean up expired entries and return count of removed items"""
+        current_time = datetime.utcnow().timestamp()
+        expired_keys = []
+        
+        with self._lock:
+            for key, timestamp in self._timestamps.items():
+                if current_time - timestamp > default_ttl:
+                    expired_keys.append(key)
+            
+            for key in expired_keys:
+                self._cache.pop(key, None)
+                self._timestamps.pop(key, None)
+                self._access_count.pop(key, None)
+        
+        return len(expired_keys)
+
+# Global cache instance
+cache = EnhancedCache(max_size=2000)
+
+def cached_response(ttl_seconds: int = 300, cache_key_params: List[str] = None, 
+                  invalidate_on: List[str] = None, vary_by_user: bool = False):
+    """
+    Enhanced decorator for caching API responses with invalidation strategies
+    
+    Args:
+        ttl_seconds: Time to live in seconds
+        cache_key_params: List of parameter names to include in cache key
+        invalidate_on: List of operations that should invalidate this cache
+        vary_by_user: Whether to include user ID in cache key
+    """
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            # Extract endpoint name
+            endpoint = func.__name__
+            
+            # Build cache key parameters
+            cache_params = {}
+            if cache_key_params:
+                for param in cache_key_params:
+                    if param in kwargs:
+                        cache_params[param] = kwargs[param]
+            
+            # Add user ID to cache key if needed
+            if vary_by_user:
+                # Try to get current user from kwargs or dependencies
+                current_user = kwargs.get('current_user')
+                if current_user and isinstance(current_user, dict):
+                    cache_params['user_id'] = current_user.get('id')
+            
+            # Try to get from cache
+            cached_data = cache.get(endpoint, cache_params, ttl_seconds)
+            if cached_data is not None:
+                # Add cache hit header
+                if isinstance(cached_data, dict):
+                    cached_data['_cache_hit'] = True
+                return cached_data
+            
+            # Execute function and cache result
+            result = await func(*args, **kwargs)
+            
+            # Only cache successful responses
+            if isinstance(result, dict) and result.get('success', False):
+                # Remove any internal fields before caching
+                cache_result = {k: v for k, v in result.items() if not k.startswith('_')}
+                cache.set(endpoint, cache_params, cache_result)
+            
+            return result
+        
+        return wrapper
+    return decorator
+
+# Cache invalidation helper
+def invalidate_cache_pattern(pattern: str) -> None:
+    """Invalidate cache entries matching a pattern"""
+    cache.clear(pattern)
+    logger.info(f"Invalidated cache entries matching pattern: {pattern}")
+
+# Periodic cache cleanup
+async def cleanup_cache_periodically():
+    """Clean up expired cache entries every 10 minutes"""
+    while True:
+        await asyncio.sleep(600)  # 10 minutes
+        removed_count = cache.cleanup_expired()
+        if removed_count > 0:
+            logger.info(f"Cleaned up {removed_count} expired cache entries")
 
 # Custom OpenAPI schema with selective authorization
 def custom_openapi():
@@ -118,13 +534,16 @@ def custom_openapi():
 
 app.openapi = custom_openapi
 
-# Dependency to get database instance
-def get_db() -> FirestoreEcommerceDB:
-    """Dependency to create/reuse Firestore database instance"""
-    project_id = os.getenv("FIRESTORE_PROJECT_ID")  # Set this in your environment
+# Enhanced database dependency with connection pooling
+@lru_cache(maxsize=1)
+def get_db_instance() -> FirestoreEcommerceDB:
+    """Create a singleton database instance"""
+    project_id = os.getenv("FIRESTORE_PROJECT_ID")
     return FirestoreEcommerceDB(project_id=project_id)
 
-# TODO: Add authentication dependency
+def get_db() -> FirestoreEcommerceDB:
+    """Dependency to get optimized Firestore database instance"""
+    return get_db_instance()
 
 async def get_current_user(authorization: str = Header(None)):
     """
@@ -132,17 +551,26 @@ async def get_current_user(authorization: str = Header(None)):
     Verifies Firebase ID token and retrieves user data from Firestore
     """
     if not authorization:
-        raise HTTPException(
-            status_code=401, 
-            detail="Authorization header missing",
-            headers={"WWW-Authenticate": "Bearer"}
+        log_security_event(
+            event_type="missing_authorization_header",
+            severity="INFO"
+        )
+        raise AuthenticationError(
+            "Authorization header missing",
+            error_code="MISSING_AUTH_HEADER",
+            context={"expected_format": "Bearer <token>"}
         )
     
     if not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=401, 
-            detail="Invalid authorization header format. Expected 'Bearer <token>'",
-            headers={"WWW-Authenticate": "Bearer"}
+        log_security_event(
+            event_type="invalid_authorization_format",
+            details={"provided_format": authorization[:20] + "..." if len(authorization) > 20 else authorization},
+            severity="WARNING"
+        )
+        raise AuthenticationError(
+            "Invalid authorization header format. Expected 'Bearer <token>'",
+            error_code="INVALID_AUTH_FORMAT",
+            context={"expected_format": "Bearer <token>"}
         )
     
     token = authorization.split(" ")[1]
@@ -224,184 +652,697 @@ async def get_current_user(authorization: str = Header(None)):
         }
         
     except auth.InvalidIdTokenError:
-        raise HTTPException(
-            status_code=401, 
-            detail="Invalid Firebase ID token",
-            headers={"WWW-Authenticate": "Bearer"}
+        log_security_event(
+            event_type="invalid_token_attempt",
+            details={"token_prefix": token[:10] + "..." if len(token) > 10 else token},
+            severity="WARNING"
+        )
+        raise AuthenticationError(
+            "Invalid Firebase ID token",
+            error_code="INVALID_TOKEN",
+            context={"token_type": "firebase_id_token"}
         )
     except auth.ExpiredIdTokenError:
-        raise HTTPException(
-            status_code=401, 
-            detail="Firebase ID token has expired",
-            headers={"WWW-Authenticate": "Bearer"}
+        log_security_event(
+            event_type="expired_token_attempt",
+            details={"token_prefix": token[:10] + "..." if len(token) > 10 else token},
+            severity="INFO"
+        )
+        raise AuthenticationError(
+            "Firebase ID token has expired",
+            error_code="EXPIRED_TOKEN",
+            context={"token_type": "firebase_id_token"}
         )
     except Exception as e:
-        logger.error(f"Error in get_current_user: {str(e)}")
-        raise HTTPException(
-            status_code=500, 
-            detail="Internal server error during authentication"
+        auth_logger.error(f"Unexpected error in authentication: {str(e)}", exc_info=True)
+        log_security_event(
+            event_type="authentication_system_error",
+            details={"error": str(e), "error_type": type(e).__name__},
+            severity="ERROR"
+        )
+        raise AuthenticationError(
+            "Authentication system temporarily unavailable",
+            error_code="AUTH_SYSTEM_ERROR",
+            context={"original_error": str(e)}
         )
 
-def require_admin():
-    """Dependency to require admin role"""
-    user = get_current_user()
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-    return user
+async def require_admin(current_user = Depends(get_current_user)):
+    """Enhanced dependency to require admin role with detailed logging"""
+    if current_user.get("role") != "admin":
+        log_security_event(
+            event_type="unauthorized_admin_access_attempt",
+            user_id=current_user.get('id'),
+            details={
+                "user_role": current_user.get('role'),
+                "required_role": "admin"
+            },
+            severity="WARNING"
+        )
+        raise AuthorizationError(
+            "Admin access required",
+            required_role="admin",
+            user_role=current_user.get('role'),
+            context={"user_id": current_user.get('id')}
+        )
+    return current_user
+
+async def require_seller_or_admin(current_user = Depends(get_current_user)):
+    """Enhanced dependency to require seller or admin role"""
+    user_role = current_user.get("role")
+    if user_role not in ["seller", "admin"]:
+        log_security_event(
+            event_type="unauthorized_seller_access_attempt",
+            user_id=current_user.get('id'),
+            details={
+                "user_role": user_role,
+                "required_roles": ["seller", "admin"]
+            },
+            severity="WARNING"
+        )
+        raise AuthorizationError(
+            "Seller or admin access required",
+            required_role="seller or admin",
+            user_role=user_role,
+            context={"user_id": current_user.get('id')}
+        )
+    return current_user
+
+async def require_manager_or_admin(current_user = Depends(get_current_user)):
+    """Enhanced dependency to require manager or admin role"""
+    user_role = current_user.get("role")
+    if user_role not in ["manager", "admin"]:
+        log_security_event(
+            event_type="unauthorized_manager_access_attempt",
+            user_id=current_user.get('id'),
+            details={
+                "user_role": user_role,
+                "required_roles": ["manager", "admin"]
+            },
+            severity="WARNING"
+        )
+        raise AuthorizationError(
+            "Manager or admin access required",
+            required_role="manager or admin",
+            user_role=user_role,
+            context={"user_id": current_user.get('id')}
+        )
+    return current_user
+
+async def require_authenticated_user(current_user = Depends(get_current_user)):
+    """Dependency to require any authenticated user"""
+    return current_user
+
+# ==================== STANDARDIZED RESPONSE MODELS ====================
+
+class StandardResponse(BaseModel):
+    """Standardized API response format"""
+    success: bool
+    data: Optional[Any] = None
+    message: str
+    timestamp: str
+    error: Optional[str] = None
+    error_code: Optional[str] = None
+
+class PaginatedResponse(BaseModel):
+    """Standardized paginated response format"""
+    success: bool
+    data: List[Any]
+    pagination: Dict[str, Any]
+    message: str
+    timestamp: str
+    error: Optional[str] = None
+
+class ValidationErrorDetail(BaseModel):
+    """Validation error detail"""
+    field: str
+    message: str
+    value: Optional[Any] = None
+
+class ValidationErrorResponse(BaseModel):
+    """Validation error response"""
+    success: bool = False
+    error: str = "Validation failed"
+    error_code: str = "VALIDATION_ERROR"
+    details: List[ValidationErrorDetail]
+    timestamp: str
+
+# ==================== CUSTOM EXCEPTIONS ====================
+
+class APIError(HTTPException):
+    """Enhanced custom API exception with error codes and context"""
+    
+    def __init__(
+        self, 
+        status_code: int, 
+        detail: str, 
+        error_code: str = None,
+        context: Dict[str, Any] = None,
+        user_message: str = None
+    ):
+        super().__init__(status_code=status_code, detail=detail)
+        self.error_code = error_code or f"HTTP_{status_code}"
+        self.context = context or {}
+        self.user_message = user_message or detail
+        self.timestamp = datetime.utcnow().isoformat()
+
+class ValidationError(APIError):
+    """Enhanced validation error exception"""
+    
+    def __init__(
+        self, 
+        detail: str, 
+        field: str = None, 
+        value: Any = None,
+        context: Dict[str, Any] = None
+    ):
+        super().__init__(422, detail, "VALIDATION_ERROR", context)
+        self.field = field
+        self.value = value
+
+class AuthenticationError(APIError):
+    """Enhanced authentication error exception"""
+    
+    def __init__(
+        self, 
+        detail: str = "Authentication required",
+        error_code: str = "AUTHENTICATION_ERROR",
+        context: Dict[str, Any] = None
+    ):
+        super().__init__(401, detail, error_code, context)
+
+class AuthorizationError(APIError):
+    """Enhanced authorization error exception"""
+    
+    def __init__(
+        self, 
+        detail: str = "Access denied",
+        required_role: str = None,
+        user_role: str = None,
+        context: Dict[str, Any] = None
+    ):
+        context = context or {}
+        if required_role:
+            context['required_role'] = required_role
+        if user_role:
+            context['user_role'] = user_role
+        super().__init__(403, detail, "AUTHORIZATION_ERROR", context)
+
+class NotFoundError(APIError):
+    """Enhanced resource not found exception"""
+    
+    def __init__(
+        self, 
+        detail: str = "Resource not found",
+        resource_type: str = None,
+        resource_id: str = None,
+        context: Dict[str, Any] = None
+    ):
+        context = context or {}
+        if resource_type:
+            context['resource_type'] = resource_type
+        if resource_id:
+            context['resource_id'] = resource_id
+        super().__init__(404, detail, "NOT_FOUND", context)
+
+class ConflictError(APIError):
+    """Enhanced resource conflict exception"""
+    
+    def __init__(
+        self, 
+        detail: str = "Resource conflict",
+        conflict_type: str = None,
+        context: Dict[str, Any] = None
+    ):
+        context = context or {}
+        if conflict_type:
+            context['conflict_type'] = conflict_type
+        super().__init__(409, detail, "CONFLICT", context)
+
+class DatabaseError(APIError):
+    """Database operation error exception"""
+    
+    def __init__(
+        self, 
+        detail: str = "Database operation failed",
+        operation: str = None,
+        collection: str = None,
+        context: Dict[str, Any] = None
+    ):
+        context = context or {}
+        if operation:
+            context['operation'] = operation
+        if collection:
+            context['collection'] = collection
+        super().__init__(500, detail, "DATABASE_ERROR", context)
+
+class RateLimitError(APIError):
+    """Rate limit exceeded exception"""
+    
+    def __init__(
+        self, 
+        detail: str = "Rate limit exceeded",
+        retry_after: int = None,
+        context: Dict[str, Any] = None
+    ):
+        context = context or {}
+        if retry_after:
+            context['retry_after'] = retry_after
+        super().__init__(429, detail, "RATE_LIMIT_EXCEEDED", context)
+
+class ServiceUnavailableError(APIError):
+    """Service unavailable exception"""
+    
+    def __init__(
+        self, 
+        detail: str = "Service temporarily unavailable",
+        service_name: str = None,
+        context: Dict[str, Any] = None
+    ):
+        context = context or {}
+        if service_name:
+            context['service_name'] = service_name
+        super().__init__(503, detail, "SERVICE_UNAVAILABLE", context)
+
+# ==================== ERROR HANDLING UTILITIES ====================
+
+def log_user_action(
+    user_id: str, 
+    action: str, 
+    resource_type: str = None, 
+    resource_id: str = None,
+    details: Dict[str, Any] = None,
+    request_id: str = None
+):
+    """Log user actions for audit trail"""
+    
+    log_data = {
+        "user_id": user_id,
+        "action": action,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    
+    if resource_type:
+        log_data["resource_type"] = resource_type
+    if resource_id:
+        log_data["resource_id"] = resource_id
+    if details:
+        log_data["details"] = details
+    if request_id:
+        log_data["request_id"] = request_id
+    
+    api_logger.info(f"User action: {log_data}")
+
+def log_security_event(
+    event_type: str,
+    user_id: str = None,
+    ip_address: str = None,
+    details: Dict[str, Any] = None,
+    severity: str = "INFO"
+):
+    """Log security-related events"""
+    
+    log_data = {
+        "event_type": event_type,
+        "timestamp": datetime.utcnow().isoformat(),
+        "severity": severity
+    }
+    
+    if user_id:
+        log_data["user_id"] = user_id
+    if ip_address:
+        log_data["ip_address"] = ip_address
+    if details:
+        log_data["details"] = details
+    
+    # Use appropriate log level based on severity
+    log_level = getattr(logging, severity.upper(), logging.INFO)
+    auth_logger.log(log_level, f"Security event: {log_data}")
+
+def handle_database_error(
+    operation: str,
+    collection: str,
+    error: Exception,
+    context: Dict[str, Any] = None
+) -> DatabaseError:
+    """Standardized database error handling"""
+    
+    error_context = {
+        "operation": operation,
+        "collection": collection,
+        "original_error": str(error),
+        "error_type": type(error).__name__
+    }
+    
+    if context:
+        error_context.update(context)
+    
+    # Log the database error
+    db_logger.error(
+        f"Database operation failed: {operation} on {collection} - {str(error)}",
+        exc_info=True
+    )
+    
+    # Return appropriate database error
+    if "not found" in str(error).lower():
+        return NotFoundError(
+            f"Resource not found in {collection}",
+            resource_type=collection,
+            context=error_context
+        )
+    elif "permission" in str(error).lower() or "unauthorized" in str(error).lower():
+        return AuthorizationError(
+            f"Insufficient permissions for {operation} on {collection}",
+            context=error_context
+        )
+    else:
+        return DatabaseError(
+            f"Database {operation} operation failed",
+            operation=operation,
+            collection=collection,
+            context=error_context
+        )
+
+def validate_request_data(
+    data: Dict[str, Any],
+    required_fields: List[str],
+    field_validators: Dict[str, callable] = None
+) -> None:
+    """Validate request data with detailed error reporting"""
+    
+    # Check required fields
+    missing_fields = [field for field in required_fields if field not in data or data[field] is None]
+    if missing_fields:
+        raise ValidationError(
+            f"Missing required fields: {', '.join(missing_fields)}",
+            field=missing_fields[0] if len(missing_fields) == 1 else "multiple",
+            context={"missing_fields": missing_fields}
+        )
+    
+    # Run custom validators
+    if field_validators:
+        for field, validator in field_validators.items():
+            if field in data:
+                try:
+                    validator(data[field])
+                except ValueError as e:
+                    raise ValidationError(
+                        f"Invalid value for field '{field}': {str(e)}",
+                        field=field,
+                        value=data[field]
+                    )
+
+# ==================== RESPONSE HELPERS ====================
+
+def create_success_response(data: Any = None, message: str = "Operation successful") -> Dict[str, Any]:
+    """Create standardized success response"""
+    return {
+        "success": True,
+        "data": data,
+        "message": message,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+def create_paginated_response(
+    data: List[Any], 
+    total_count: Optional[int] = None,
+    page: int = 1,
+    limit: int = 20,
+    has_next: bool = False,
+    next_cursor: Optional[str] = None,
+    message: str = "Data retrieved successfully"
+) -> Dict[str, Any]:
+    """Create standardized paginated response"""
+    pagination = {
+        "page": page,
+        "limit": limit,
+        "count": len(data),
+        "has_next": has_next
+    }
+    
+    if total_count is not None:
+        pagination["total_count"] = total_count
+    
+    if next_cursor:
+        pagination["next_cursor"] = next_cursor
+    
+    return {
+        "success": True,
+        "data": data,
+        "pagination": pagination,
+        "message": message,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+def create_error_response(
+    error: str, 
+    error_code: str = "INTERNAL_ERROR",
+    details: Optional[Any] = None
+) -> Dict[str, Any]:
+    """Create standardized error response"""
+    response = {
+        "success": False,
+        "error": error,
+        "error_code": error_code,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    
+    if details:
+        response["details"] = details
+    
+    return response
+
+# ==================== INPUT VALIDATION HELPERS ====================
+
+def validate_pagination_params(limit: int, page: int = 1) -> Tuple[int, int]:
+    """Validate and normalize pagination parameters"""
+    if limit < 1 or limit > 100:
+        raise ValidationError("Limit must be between 1 and 100", "limit")
+    
+    if page < 1:
+        raise ValidationError("Page must be greater than 0", "page")
+    
+    return limit, page
+
+def validate_price_range(min_price: Optional[float], max_price: Optional[float]) -> None:
+    """Validate price range parameters"""
+    if min_price is not None and min_price < 0:
+        raise ValidationError("Minimum price cannot be negative", "min_price")
+    
+    if max_price is not None and max_price < 0:
+        raise ValidationError("Maximum price cannot be negative", "max_price")
+    
+    if min_price is not None and max_price is not None and min_price > max_price:
+        raise ValidationError("Minimum price cannot be greater than maximum price", "price_range")
+
+def validate_user_access(current_user: Dict[str, Any], target_user_id: str, allow_admin: bool = True) -> None:
+    """Validate user access to resources"""
+    if current_user['id'] != target_user_id:
+        if not (allow_admin and current_user.get('role') == 'admin'):
+            raise AuthorizationError("You can only access your own resources")
 
 # ==================== PYDANTIC MODELS ====================
 
 class UserCreate(BaseModel):
-    email: str
-    name: str
-    role: str = "customer"
-    phone: Optional[str] = None
-    address: Optional[Dict[str, Any]] = None
-    preferences: Optional[Dict[str, Any]] = None
+    email: str = Field(..., pattern=r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', description="Valid email address")
+    name: str = Field(..., min_length=1, max_length=100, description="User's full name")
+    role: str = Field("customer", pattern=r'^(customer|seller|admin|manager)$', description="User role")
+    phone: Optional[str] = Field(None, pattern=r'^\+?[\d\s\-\(\)]{10,15}$', description="Phone number")
+    address: Optional[Dict[str, Any]] = Field(None, description="User address")
+    preferences: Optional[Dict[str, Any]] = Field(None, description="User preferences")
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "email": "user@example.com",
+                "name": "John Doe",
+                "role": "customer",
+                "phone": "+1234567890",
+                "address": {
+                    "street": "123 Main St",
+                    "city": "Anytown",
+                    "state": "CA",
+                    "zip": "12345",
+                    "country": "US"
+                }
+            }
+        }
 
 class UserUpdate(BaseModel):
-    name: Optional[str] = None
-    phone: Optional[str] = None
-    address: Optional[Dict[str, Any]] = None
-    preferences: Optional[Dict[str, Any]] = None
+    name: Optional[str] = Field(None, min_length=1, max_length=100, description="User's full name")
+    phone: Optional[str] = Field(None, pattern=r'^\+?[\d\s\-\(\)]{10,15}$', description="Phone number")
+    address: Optional[Dict[str, Any]] = Field(None, description="User address")
+    preferences: Optional[Dict[str, Any]] = Field(None, description="User preferences")
 
 class ProductCreate(BaseModel):
-    title: str
-    description: str
-    price: float
-    category_id: str
-    subcategory_id: Optional[str] = None
-    seller_id: str
-    images: List[str] = []
-    specifications: Optional[Dict[str, Any]] = None
-    tags: List[str] = []
-    inventory_quantity: int = 0
-    sku: Optional[str] = None
-    weight: Optional[float] = None
-    dimensions: Optional[Dict[str, float]] = None
-    is_featured: bool = False
+    title: str = Field(..., min_length=1, max_length=200, description="Product title")
+    description: str = Field(..., min_length=10, max_length=2000, description="Product description")
+    price: float = Field(..., gt=0, le=1000000, description="Product price")
+    category_id: str = Field(..., min_length=1, description="Category ID")
+    subcategory_id: Optional[str] = Field(None, description="Subcategory ID")
+    seller_id: str = Field(..., min_length=1, description="Seller ID")
+    images: List[str] = Field(default_factory=list, max_items=10, description="Product images URLs")
+    specifications: Optional[Dict[str, Any]] = Field(None, description="Product specifications")
+    tags: List[str] = Field(default_factory=list, max_items=20, description="Product tags")
+    inventory_quantity: int = Field(0, ge=0, description="Initial inventory quantity")
+    sku: Optional[str] = Field(None, max_length=50, description="Stock Keeping Unit")
+    weight: Optional[float] = Field(None, gt=0, description="Product weight in kg")
+    dimensions: Optional[Dict[str, float]] = Field(None, description="Product dimensions")
+    is_featured: bool = Field(False, description="Whether product is featured")
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "title": "Wireless Bluetooth Headphones",
+                "description": "High-quality wireless headphones with noise cancellation",
+                "price": 99.99,
+                "category_id": "electronics",
+                "seller_id": "seller123",
+                "images": ["https://example.com/image1.jpg"],
+                "tags": ["wireless", "bluetooth", "headphones"],
+                "inventory_quantity": 50,
+                "sku": "WBH-001"
+            }
+        }
 
 class ProductUpdate(BaseModel):
-    title: Optional[str] = None
-    description: Optional[str] = None
-    price: Optional[float] = None
-    category_id: Optional[str] = None
-    subcategory_id: Optional[str] = None
-    images: Optional[List[str]] = None
-    specifications: Optional[Dict[str, Any]] = None
-    tags: Optional[List[str]] = None
-    inventory_quantity: Optional[int] = None
-    sku: Optional[str] = None
-    weight: Optional[float] = None
-    dimensions: Optional[Dict[str, float]] = None
-    is_featured: Optional[bool] = None
-    status: Optional[str] = None
+    title: Optional[str] = Field(None, min_length=1, max_length=200, description="Product title")
+    description: Optional[str] = Field(None, min_length=10, max_length=2000, description="Product description")
+    price: Optional[float] = Field(None, gt=0, le=1000000, description="Product price")
+    category_id: Optional[str] = Field(None, min_length=1, description="Category ID")
+    subcategory_id: Optional[str] = Field(None, description="Subcategory ID")
+    images: Optional[List[str]] = Field(None, max_items=10, description="Product images URLs")
+    specifications: Optional[Dict[str, Any]] = Field(None, description="Product specifications")
+    tags: Optional[List[str]] = Field(None, max_items=20, description="Product tags")
+    inventory_quantity: Optional[int] = Field(None, ge=0, description="Inventory quantity")
+    sku: Optional[str] = Field(None, max_length=50, description="Stock Keeping Unit")
+    weight: Optional[float] = Field(None, gt=0, description="Product weight in kg")
+    dimensions: Optional[Dict[str, float]] = Field(None, description="Product dimensions")
+    is_featured: Optional[bool] = Field(None, description="Whether product is featured")
+    status: Optional[str] = Field(None, pattern=r'^(active|inactive|archived|draft)$', description="Product status")
+
+class OrderItem(BaseModel):
+    product_id: str = Field(..., min_length=1, description="Product ID")
+    quantity: int = Field(..., gt=0, le=1000, description="Quantity")
+    price: float = Field(..., gt=0, description="Unit price")
+    variant_id: Optional[str] = Field(None, description="Product variant ID")
+    attributes: Optional[Dict[str, Any]] = Field(None, description="Item attributes")
 
 class OrderCreate(BaseModel):
-    customer_id: str
-    seller_id: str
-    items: List[Dict[str, Any]]
-    total_amount: float
-    currency: str = "USD"
-    shipping_address: Dict[str, Any]
-    billing_address: Optional[Dict[str, Any]] = None
-    payment_method: Optional[str] = None
-    shipping_method: Optional[str] = None
-    notes: Optional[str] = None
+    customer_id: str = Field(..., min_length=1, description="Customer ID")
+    seller_id: str = Field(..., min_length=1, description="Seller ID")
+    items: List[OrderItem] = Field(..., min_items=1, max_items=50, description="Order items")
+    total_amount: float = Field(..., gt=0, le=1000000, description="Total order amount")
+    currency: str = Field("USD", pattern=r'^[A-Z]{3}$', description="Currency code")
+    shipping_address: Dict[str, Any] = Field(..., description="Shipping address")
+    billing_address: Optional[Dict[str, Any]] = Field(None, description="Billing address")
+    payment_method: Optional[str] = Field(None, description="Payment method")
+    shipping_method: Optional[str] = Field(None, description="Shipping method")
+    notes: Optional[str] = Field(None, max_length=500, description="Order notes")
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "customer_id": "customer123",
+                "seller_id": "seller456",
+                "items": [
+                    {
+                        "product_id": "prod123",
+                        "quantity": 2,
+                        "price": 29.99
+                    }
+                ],
+                "total_amount": 59.98,
+                "currency": "USD",
+                "shipping_address": {
+                    "street": "123 Main St",
+                    "city": "Anytown",
+                    "state": "CA",
+                    "zip": "12345",
+                    "country": "US"
+                }
+            }
+        }
 
 class OrderStatusUpdate(BaseModel):
-    status: str
-    fulfillment_details: Optional[Dict[str, Any]] = None
+    status: str = Field(..., pattern=r'^(pending|confirmed|processing|shipped|delivered|cancelled|refunded)$', description="Order status")
+    fulfillment_details: Optional[Dict[str, Any]] = Field(None, description="Fulfillment details")
 
 class OrderCancel(BaseModel):
-    reason: str
-    refund_amount: Optional[float] = None
+    reason: str = Field(..., min_length=1, max_length=500, description="Cancellation reason")
+    refund_amount: Optional[float] = Field(None, ge=0, description="Refund amount")
 
 class CategoryCreate(BaseModel):
-    name: str
-    description: Optional[str] = None
-    parent_id: Optional[str] = None
-    image_url: Optional[str] = None
-    sort_order: int = 0
-    meta_title: Optional[str] = None
-    meta_description: Optional[str] = None
+    name: str = Field(..., min_length=1, max_length=100, description="Category name")
+    description: Optional[str] = Field(None, max_length=500, description="Category description")
+    parent_id: Optional[str] = Field(None, description="Parent category ID")
+    image_url: Optional[str] = Field(None, pattern=r'^https?://.+', description="Category image URL")
+    sort_order: int = Field(0, ge=0, description="Sort order")
+    meta_title: Optional[str] = Field(None, max_length=100, description="SEO meta title")
+    meta_description: Optional[str] = Field(None, max_length=200, description="SEO meta description")
 
 class CategoryUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    parent_id: Optional[str] = None
-    image_url: Optional[str] = None
-    sort_order: Optional[int] = None
-    meta_title: Optional[str] = None
-    meta_description: Optional[str] = None
+    name: Optional[str] = Field(None, min_length=1, max_length=100, description="Category name")
+    description: Optional[str] = Field(None, max_length=500, description="Category description")
+    parent_id: Optional[str] = Field(None, description="Parent category ID")
+    image_url: Optional[str] = Field(None, pattern=r'^https?://.+', description="Category image URL")
+    sort_order: Optional[int] = Field(None, ge=0, description="Sort order")
+    meta_title: Optional[str] = Field(None, max_length=100, description="SEO meta title")
+    meta_description: Optional[str] = Field(None, max_length=200, description="SEO meta description")
 
-class InventoryCreate(BaseModel):
-    product_id: str
-    warehouse_id: str
-    available_stock: int
-    reserved_stock: int = 0
-    low_stock_threshold: int = 10
-    cost_per_unit: Optional[float] = None
 
-class InventoryUpdate(BaseModel):
-    quantity_change: int
-    movement_type: str  # 'stock_in', 'stock_out', 'adjustment', 'transfer'
-    notes: Optional[str] = None
-
-class WarehouseCreate(BaseModel):
-    name: str
-    address: Dict[str, Any]
-    contact_info: Dict[str, Any]
-    capacity: Optional[int] = None
-    manager_id: Optional[str] = None
 
 class CartItemAdd(BaseModel):
-    product_id: str
-    variant_id: Optional[str] = None
-    quantity: int = 1
-    price: float
-    attributes: Optional[Dict[str, Any]] = None
+    product_id: str = Field(..., min_length=1, description="Product ID")
+    variant_id: Optional[str] = Field(None, description="Product variant ID")
+    quantity: int = Field(1, gt=0, le=100, description="Quantity")
+    price: float = Field(..., gt=0, description="Unit price")
+    attributes: Optional[Dict[str, Any]] = Field(None, description="Item attributes")
 
 class CartItemUpdate(BaseModel):
-    quantity: Optional[int] = None
-    variant_id: Optional[str] = None
-    attributes: Optional[Dict[str, Any]] = None
+    quantity: Optional[int] = Field(None, gt=0, le=100, description="Quantity")
+    variant_id: Optional[str] = Field(None, description="Product variant ID")
+    attributes: Optional[Dict[str, Any]] = Field(None, description="Item attributes")
 
 class ReviewCreate(BaseModel):
-    product_id: str
-    user_id: str
-    order_id: Optional[str] = None
-    rating: int = Field(..., ge=1, le=5)
-    title: Optional[str] = None
-    content: str
-    images: List[str] = []
-    verified_purchase: bool = False
+    product_id: str = Field(..., min_length=1, description="Product ID")
+    user_id: str = Field(..., min_length=1, description="User ID")
+    order_id: Optional[str] = Field(None, description="Order ID for verified purchase")
+    rating: int = Field(..., ge=1, le=5, description="Rating from 1 to 5")
+    title: Optional[str] = Field(None, max_length=100, description="Review title")
+    content: str = Field(..., min_length=10, max_length=2000, description="Review content")
+    images: List[str] = Field(default_factory=list, max_items=5, description="Review images")
+    verified_purchase: bool = Field(False, description="Whether this is a verified purchase")
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "product_id": "prod123",
+                "user_id": "user456",
+                "rating": 5,
+                "title": "Great product!",
+                "content": "This product exceeded my expectations. Highly recommended!"
+            }
+        }
 
 class ReviewUpdate(BaseModel):
-    rating: Optional[int] = Field(None, ge=1, le=5)
-    title: Optional[str] = None
-    content: Optional[str] = None
-    images: Optional[List[str]] = None
+    rating: Optional[int] = Field(None, ge=1, le=5, description="Rating from 1 to 5")
+    title: Optional[str] = Field(None, max_length=100, description="Review title")
+    content: Optional[str] = Field(None, min_length=10, max_length=2000, description="Review content")
+    images: Optional[List[str]] = Field(None, max_items=5, description="Review images")
 
 class ReviewModerate(BaseModel):
-    action: str  # 'approved' or 'rejected'
-    notes: Optional[str] = None
+    action: str = Field(..., pattern=r'^(approved|rejected)$', description="Moderation action")
+    notes: Optional[str] = Field(None, max_length=500, description="Moderation notes")
 
 class NotificationCreate(BaseModel):
-    user_id: str
-    type: str  # 'order_update', 'product_alert', 'promotion', etc.
-    title: str
-    message: str
-    data: Optional[Dict[str, Any]] = None
-    channel: str = "app"  # 'app', 'email', 'sms'
+    user_id: str = Field(..., min_length=1, description="User ID")
+    type: str = Field(..., pattern=r'^(order_update|product_alert|promotion|system|security)$', description="Notification type")
+    title: str = Field(..., min_length=1, max_length=100, description="Notification title")
+    message: str = Field(..., min_length=1, max_length=500, description="Notification message")
+    data: Optional[Dict[str, Any]] = Field(None, description="Additional notification data")
+    channel: str = Field("app", pattern=r'^(app|email|sms|push)$', description="Notification channel")
 
-class SupplierCreate(BaseModel):
-    name: str
-    contact_info: Dict[str, Any]
-    address: Dict[str, Any]
-    payment_terms: Optional[str] = None
-    lead_time_days: Optional[int] = None
-    minimum_order_quantity: Optional[int] = None
+
 
 # ==================== AUTHENTICATION ENDPOINTS ====================
 
@@ -456,19 +1397,114 @@ async def create_user(
 
 @app.get("/users/{user_id}", response_model=Dict[str, Any], summary="Get user profile")
 async def get_user(
-    user_id: str = Path(..., description="User ID"),
+    request: Request,
+    user_id: str = Path(..., min_length=1, description="User ID"),
     db: FirestoreEcommerceDB = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """Get user profile by ID"""
-    # TODO: Add authorization - users can only access their own profile unless admin
-    if current_user['id'] != user_id and current_user['role'] != 'admin':
-        raise HTTPException(status_code=403, detail="Access denied")
+    """Get user profile by ID with enhanced error handling and logging"""
     
-    result = db.get_user_profile(user_id)
-    if not result['success']:
-        raise HTTPException(status_code=404, detail=result['error'])
-    return result
+    request_id = getattr(request.state, 'request_id', 'unknown')
+    
+    try:
+        # Log user access attempt
+        log_user_action(
+            user_id=current_user['id'],
+            action="get_user_profile",
+            resource_type="user",
+            resource_id=user_id,
+            request_id=request_id
+        )
+        
+        # Validate user access with enhanced error context
+        if current_user['id'] != user_id:
+            if current_user.get('role') != 'admin':
+                log_security_event(
+                    event_type="unauthorized_user_access_attempt",
+                    user_id=current_user['id'],
+                    details={
+                        "attempted_user_id": user_id,
+                        "user_role": current_user.get('role')
+                    },
+                    severity="WARNING"
+                )
+                raise AuthorizationError(
+                    "You can only access your own profile",
+                    required_role="admin or self",
+                    user_role=current_user.get('role'),
+                    context={
+                        "requested_user_id": user_id,
+                        "current_user_id": current_user['id']
+                    }
+                )
+        
+        # Attempt to get user profile with enhanced error handling
+        try:
+            result = db.get_user_profile(user_id)
+        except Exception as db_error:
+            raise handle_database_error(
+                operation="get_user_profile",
+                collection="users",
+                error=db_error,
+                context={"user_id": user_id}
+            )
+        
+        if not result['success']:
+            if "not found" in result.get('error', '').lower():
+                raise NotFoundError(
+                    f"User profile not found",
+                    resource_type="user",
+                    resource_id=user_id,
+                    context={"database_error": result.get('error')}
+                )
+            else:
+                raise DatabaseError(
+                    "Failed to retrieve user profile",
+                    operation="get_user_profile",
+                    collection="users",
+                    context={
+                        "user_id": user_id,
+                        "database_error": result.get('error')
+                    }
+                )
+        
+        user_data = result.get('data')
+        if not user_data:
+            raise NotFoundError(
+                f"User profile data is empty",
+                resource_type="user",
+                resource_id=user_id
+            )
+        
+        # Log successful access
+        api_logger.info(
+            f"[{request_id}] User profile retrieved successfully - "
+            f"User: {current_user['id']} accessed profile: {user_id}"
+        )
+        
+        return create_success_response(
+            data=user_data,
+            message="User profile retrieved successfully"
+        )
+        
+    except (AuthorizationError, NotFoundError, ValidationError, DatabaseError) as e:
+        # These are expected errors that should be re-raised as-is
+        raise e
+    except Exception as e:
+        # Unexpected errors - log and convert to generic error
+        api_logger.error(
+            f"[{request_id}] Unexpected error getting user {user_id}: {str(e)}",
+            exc_info=True
+        )
+        raise APIError(
+            500, 
+            "An unexpected error occurred while retrieving user profile", 
+            "INTERNAL_ERROR",
+            context={
+                "user_id": user_id,
+                "operation": "get_user_profile"
+            }
+        )
 
 @app.put("/users/{user_id}", response_model=Dict[str, Any], summary="Update user profile")
 async def update_user(
@@ -478,7 +1514,7 @@ async def update_user(
     current_user = Depends(get_current_user)
 ):
     """Update user profile"""
-    # TODO: Add authorization - users can only update their own profile
+    # Users can only update their own profile unless admin
     if current_user['id'] != user_id and current_user['role'] != 'admin':
         raise HTTPException(status_code=403, detail="Access denied")
     
@@ -519,112 +1555,210 @@ async def deactivate_user(
 async def add_product(
     product_data: ProductCreate,
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_seller_or_admin)
 ):
-    """Add a new product"""
-    # TODO: Add authorization - only sellers and admins can add products
-    if current_user['role'] not in ['seller', 'admin']:
-        raise HTTPException(status_code=403, detail="Seller or admin access required")
-    
-    result = db.add_product(product_data.dict())
-    if not result['success']:
-        raise HTTPException(status_code=400, detail=result['error'])
-    return result
+    """Add a new product with validation and standardized response"""
+    try:
+        # Ensure seller_id matches current user (unless admin)
+        if current_user['role'] != 'admin' and product_data.seller_id != current_user['id']:
+            raise AuthorizationError("You can only create products for yourself")
+        
+        # Validate product data
+        product_dict = product_data.dict()
+        
+        # Additional business logic validation
+        if product_dict.get('price', 0) <= 0:
+            raise ValidationError("Product price must be greater than 0", "price")
+        
+        if len(product_dict.get('images', [])) == 0:
+            logger.warning(f"Product created without images by user {current_user['id']}")
+        
+        result = db.add_product(product_dict)
+        if not result['success']:
+            if "already exists" in result.get('error', '').lower():
+                raise ConflictError("Product with this SKU already exists")
+            else:
+                raise APIError(400, result['error'], "DATABASE_ERROR")
+        
+        product_id = result.get('data', {}).get('product_id')
+        
+        # Invalidate relevant caches
+        cache.clear("get_featured_products")
+        cache.clear("get_active_products")
+        cache.clear("get_products")
+        
+        return create_success_response(
+            data={
+                "product_id": product_id,
+                "seller_id": product_data.seller_id,
+                "title": product_data.title
+            },
+            message="Product created successfully"
+        )
+        
+    except (AuthorizationError, ValidationError, ConflictError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error creating product: {str(e)}")
+        raise APIError(500, "Failed to create product", "INTERNAL_ERROR")
 
 @app.get("/products/active", response_model=Dict[str, Any], summary="Get active products")
+@cached_response(ttl_seconds=300, cache_key_params=['limit', 'last_doc_id'])  # Cache for 5 minutes
 async def get_active_products(
-    limit: int = Query(20, description="Number of products to return"),
+    limit: int = Query(20, ge=1, le=100, description="Number of products to return"),
     last_doc_id: Optional[str] = Query(None, description="Last document ID for pagination"),
     db: FirestoreEcommerceDB = Depends(get_db)
 ):
-    """Get all active products"""
-    result = db.get_active_products(limit, last_doc_id)
-    if not result['success']:
-        raise HTTPException(status_code=400, detail=result['error'])
-    return result
+    """Get all active products with pagination"""
+    try:
+        # Validate pagination parameters
+        limit, _ = validate_pagination_params(limit)
+        
+        result = db.get_active_products(limit, last_doc_id)
+        if not result['success']:
+            raise APIError(400, result['error'], "DATABASE_ERROR")
+        
+        # Convert to standardized paginated response
+        products = result.get('data', [])
+        has_next = len(products) == limit  # Simple check for more data
+        
+        return create_paginated_response(
+            data=products,
+            limit=limit,
+            has_next=has_next,
+            next_cursor=products[-1].get('id') if products else None,
+            message="Active products retrieved successfully"
+        )
+        
+    except ValidationError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting active products: {str(e)}")
+        raise APIError(500, "Failed to retrieve active products", "INTERNAL_ERROR")
 
 @app.get("/products/featured", response_model=Dict[str, Any], summary="Get featured products")
+@cached_response(ttl_seconds=600, cache_key_params=['limit'])  # Cache for 10 minutes
 async def get_featured_products(
-    limit: int = Query(10, description="Number of featured products to return"),
+    limit: int = Query(10, ge=1, le=50, description="Number of featured products to return"),
     db: FirestoreEcommerceDB = Depends(get_db)
 ):
     """Get featured products - Public access"""
-    result = db.get_featured_products(limit)
-    if not result['success']:
-        raise HTTPException(status_code=400, detail=result['error'])
-    return result
+    try:
+        # Validate pagination parameters
+        limit, _ = validate_pagination_params(limit)
+        
+        result = db.get_featured_products(limit)
+        if not result['success']:
+            raise APIError(400, result['error'], "DATABASE_ERROR")
+        
+        products = result.get('data', [])
+        
+        return create_success_response(
+            data=products,
+            message=f"Retrieved {len(products)} featured products"
+        )
+        
+    except ValidationError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting featured products: {str(e)}")
+        raise APIError(500, "Failed to retrieve featured products", "INTERNAL_ERROR")
 
 @app.get("/products", response_model=Dict[str, Any], summary="Get products with filters")
+@cached_response(ttl_seconds=180, cache_key_params=['category_id', 'subcategory_id', 'seller_id', 'min_price', 'max_price', 'tags', 'limit', 'last_doc_id'])  # Cache for 3 minutes
 async def get_products(
-    category_id: Optional[str] = Query(None, description="Filter by category ID"),
-    subcategory_id: Optional[str] = Query(None, description="Filter by subcategory ID"),
-    seller_id: Optional[str] = Query(None, description="Filter by seller ID"),
-    min_price: Optional[float] = Query(None, description="Minimum price filter"),
-    max_price: Optional[float] = Query(None, description="Maximum price filter"),
+    category_id: Optional[str] = Query(None, min_length=1, description="Filter by category ID"),
+    subcategory_id: Optional[str] = Query(None, min_length=1, description="Filter by subcategory ID"),
+    seller_id: Optional[str] = Query(None, min_length=1, description="Filter by seller ID"),
+    min_price: Optional[float] = Query(None, ge=0, description="Minimum price filter"),
+    max_price: Optional[float] = Query(None, ge=0, description="Maximum price filter"),
     tags: Optional[str] = Query(None, description="Comma-separated tags to filter by"),
-    limit: int = Query(20, description="Number of products to return"),
+    limit: int = Query(20, ge=1, le=100, description="Number of products to return"),
     last_doc_id: Optional[str] = Query(None, description="Last document ID for pagination"),
     db: FirestoreEcommerceDB = Depends(get_db)
 ):
-    """Get products with optional filters"""
-    filters = {}
-    if category_id:
-        filters['category_id'] = category_id
-    if subcategory_id:
-        filters['subcategory_id'] = subcategory_id
-    if seller_id:
-        filters['seller_id'] = seller_id
-    if min_price is not None:
-        filters['min_price'] = min_price
-    if max_price is not None:
-        filters['max_price'] = max_price
-    if tags:
-        filters['tags'] = [tag.strip() for tag in tags.split(',')]
-    
-    result = db.get_products_with_filters(filters, limit, last_doc_id)
-    if not result['success']:
-        raise HTTPException(status_code=400, detail=result['error'])
-    return result
-
-@app.get("/products/{product_id}", response_model=Dict[str, Any], summary="Get product by ID")
-async def get_product(
-    product_id: str = Path(..., description="Product ID"),
-    increment_view: bool = Query(True, description="Whether to increment view count"),
-    db: FirestoreEcommerceDB = Depends(get_db)
-):
-    """Get product details by ID"""
-    result = db.get_product(product_id, increment_view)
-    if not result['success']:
-        raise HTTPException(status_code=404, detail=result['error'])
-    return result
-
-@app.put("/products/{product_id}", response_model=Dict[str, Any], summary="Update product")
-async def update_product(
-    product_id: str = Path(..., description="Product ID"),
-    product_data: ProductUpdate = Body(...),
-    db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """Update product details"""
-    # TODO: Add authorization - only product owner or admin
-    result = db.update_product(product_id, product_data.dict(exclude_unset=True))
-    if not result['success']:
-        raise HTTPException(status_code=400, detail=result['error'])
-    return result
+    """Get products with optional filters and pagination"""
+    try:
+        # Validate parameters
+        limit, _ = validate_pagination_params(limit)
+        validate_price_range(min_price, max_price)
+        
+        # Build filters
+        filters = {}
+        if category_id:
+            filters['category_id'] = category_id
+        if subcategory_id:
+            filters['subcategory_id'] = subcategory_id
+        if seller_id:
+            filters['seller_id'] = seller_id
+        if min_price is not None:
+            filters['min_price'] = min_price
+        if max_price is not None:
+            filters['max_price'] = max_price
+        if tags:
+            # Clean and validate tags
+            tag_list = [tag.strip() for tag in tags.split(',') if tag.strip()]
+            if len(tag_list) > 10:
+                raise ValidationError("Maximum 10 tags allowed", "tags")
+            filters['tags'] = tag_list
+        
+        result = db.get_products_with_filters(filters, limit, last_doc_id)
+        if not result['success']:
+            raise APIError(400, result['error'], "DATABASE_ERROR")
+        
+        products = result.get('data', [])
+        has_next = len(products) == limit
+        
+        return create_paginated_response(
+            data=products,
+            limit=limit,
+            has_next=has_next,
+            next_cursor=products[-1].get('id') if products else None,
+            message=f"Retrieved {len(products)} products with filters"
+        )
+        
+    except ValidationError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting products with filters: {str(e)}")
+        raise APIError(500, "Failed to retrieve products", "INTERNAL_ERROR")
 
 @app.get("/products/search", response_model=Dict[str, Any], summary="Search products")
+@cached_response(ttl_seconds=120, cache_key_params=['q', 'limit'])  # Cache for 2 minutes
 async def search_products(
-    q: str = Query(..., description="Search keywords"),
-    limit: int = Query(20, description="Number of products to return"),
+    q: str = Query(..., min_length=1, max_length=100, description="Search keywords"),
+    limit: int = Query(20, ge=1, le=100, description="Number of products to return"),
     db: FirestoreEcommerceDB = Depends(get_db)
 ):
-    """Search products by keywords"""
-    result = db.search_products(q, limit)
-    if not result['success']:
-        raise HTTPException(status_code=400, detail=result['error'])
-    return result
+    """Search products by keywords with validation and standardized response"""
+    try:
+        # Validate parameters
+        limit, _ = validate_pagination_params(limit)
+        
+        # Clean search query
+        search_query = q.strip()
+        if not search_query:
+            raise ValidationError("Search query cannot be empty", "q")
+        
+        result = db.search_products(search_query, limit)
+        if not result['success']:
+            raise APIError(400, result['error'], "SEARCH_ERROR")
+        
+        products = result.get('data', [])
+        
+        return create_success_response(
+            data=products,
+            message=f"Found {len(products)} products matching '{search_query}'"
+        )
+        
+    except ValidationError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error searching products: {str(e)}")
+        raise APIError(500, "Search operation failed", "INTERNAL_ERROR")
 
 @app.get("/products/popular", response_model=Dict[str, Any], summary="Get popular products")
+@cached_response(ttl_seconds=900, cache_key_params=['metric', 'limit'])  # Cache for 15 minutes
 async def get_popular_products(
     metric: str = Query("sales", description="Metric to sort by (sales, views)"),
     limit: int = Query(10, description="Number of products to return"),
@@ -636,15 +1770,79 @@ async def get_popular_products(
         raise HTTPException(status_code=400, detail=result['error'])
     return result
 
+@app.get("/products/{product_id}", response_model=Dict[str, Any], summary="Get product by ID")
+async def get_product(
+    product_id: str = Path(..., min_length=1, description="Product ID"),
+    increment_view: bool = Query(True, description="Whether to increment view count"),
+    db: FirestoreEcommerceDB = Depends(get_db)
+):
+    """Get product details by ID with optional view count increment"""
+    try:
+        result = db.get_product(product_id, increment_view)
+        if not result['success']:
+            if "not found" in result.get('error', '').lower():
+                raise NotFoundError(f"Product with ID '{product_id}' not found")
+            else:
+                raise APIError(400, result['error'], "DATABASE_ERROR")
+        
+        product = result.get('data')
+        if not product:
+            raise NotFoundError(f"Product with ID '{product_id}' not found")
+        
+        return create_success_response(
+            data=product,
+            message="Product retrieved successfully"
+        )
+        
+    except (NotFoundError, ValidationError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting product {product_id}: {str(e)}")
+        raise APIError(500, "Failed to retrieve product", "INTERNAL_ERROR")
+
+@app.put("/products/{product_id}", response_model=Dict[str, Any], summary="Update product")
+async def update_product(
+    product_id: str = Path(..., description="Product ID"),
+    product_data: ProductUpdate = Body(...),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(require_seller_or_admin)
+):
+    """Update product details"""
+    # Check if user owns the product or is admin
+    if current_user['role'] != 'admin':
+        # Get product to check ownership
+        product_result = db.get_product(product_id, increment_view=False)
+        if not product_result['success']:
+            raise HTTPException(status_code=404, detail="Product not found")
+        
+        product = product_result['data']
+        if product.get('seller_id') != current_user['id']:
+            raise HTTPException(status_code=403, detail="You can only update your own products")
+    
+    result = db.update_product(product_id, product_data.dict(exclude_unset=True))
+    if not result['success']:
+        raise HTTPException(status_code=400, detail=result['error'])
+    return result
+
 @app.patch("/products/{product_id}/archive", response_model=Dict[str, Any], summary="Archive product")
 async def archive_product(
     product_id: str = Path(..., description="Product ID"),
     status: str = Query("archived", description="New status for the product"),
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_seller_or_admin)
 ):
     """Archive or deactivate a product"""
-    # TODO: Add authorization - only product owner or admin
+    # Check if user owns the product or is admin
+    if current_user['role'] != 'admin':
+        # Get product to check ownership
+        product_result = db.get_product(product_id, increment_view=False)
+        if not product_result['success']:
+            raise HTTPException(status_code=404, detail="Product not found")
+        
+        product = product_result['data']
+        if product.get('seller_id') != current_user['id']:
+            raise HTTPException(status_code=403, detail="You can only archive your own products")
+    
     result = db.archive_product(product_id, status)
     if not result['success']:
         raise HTTPException(status_code=400, detail=result['error'])
@@ -654,10 +1852,20 @@ async def archive_product(
 async def batch_update_products(
     updates: List[Dict[str, Any]] = Body(..., description="List of product updates"),
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_seller_or_admin)
 ):
     """Batch update products (admin or seller only)"""
-    # TODO: Add authorization check
+    # For sellers, verify they own all products being updated
+    if current_user['role'] != 'admin':
+        for update in updates:
+            product_id = update.get('product_id')
+            if product_id:
+                product_result = db.get_product(product_id, increment_view=False)
+                if product_result['success']:
+                    product = product_result['data']
+                    if product.get('seller_id') != current_user['id']:
+                        raise HTTPException(status_code=403, detail=f"You can only update your own products (Product ID: {product_id})")
+    
     result = db.batch_update_products(updates)
     if not result['success']:
         raise HTTPException(status_code=400, detail=result['error'])
@@ -669,14 +1877,58 @@ async def batch_update_products(
 async def create_order(
     order_data: OrderCreate,
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_authenticated_user)
 ):
-    """Create a new order"""
-    # TODO: Add authorization - authenticated users only
-    result = db.create_order(order_data.dict())
-    if not result['success']:
-        raise HTTPException(status_code=400, detail=result['error'])
-    return result
+    """Create a new order with validation and standardized response"""
+    try:
+        # Validate customer access
+        if current_user['role'] != 'admin' and order_data.customer_id != current_user['id']:
+            raise AuthorizationError("You can only create orders for yourself")
+        
+        # Validate order data
+        order_dict = order_data.dict()
+        
+        # Business logic validation
+        if not order_dict.get('items'):
+            raise ValidationError("Order must contain at least one item", "items")
+        
+        # Validate total amount matches items
+        calculated_total = sum(item['quantity'] * item['price'] for item in order_dict['items'])
+        if abs(calculated_total - order_dict['total_amount']) > 0.01:
+            raise ValidationError("Total amount does not match item prices", "total_amount")
+        
+        # Validate shipping address
+        shipping_address = order_dict.get('shipping_address', {})
+        required_address_fields = ['street', 'city', 'zip', 'country']
+        missing_fields = [field for field in required_address_fields if not shipping_address.get(field)]
+        if missing_fields:
+            raise ValidationError(f"Missing required address fields: {', '.join(missing_fields)}", "shipping_address")
+        
+        result = db.create_order(order_dict)
+        if not result['success']:
+            if "insufficient inventory" in result.get('error', '').lower():
+                raise ConflictError("Insufficient inventory for one or more items")
+            else:
+                raise APIError(400, result['error'], "DATABASE_ERROR")
+        
+        order_id = result.get('data', {}).get('order_id')
+        
+        return create_success_response(
+            data={
+                "order_id": order_id,
+                "customer_id": order_data.customer_id,
+                "total_amount": order_data.total_amount,
+                "currency": order_data.currency,
+                "status": "pending"
+            },
+            message="Order created successfully"
+        )
+        
+    except (AuthorizationError, ValidationError, ConflictError) as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error creating order: {str(e)}")
+        raise APIError(500, "Failed to create order", "INTERNAL_ERROR")
 
 @app.get("/orders/{order_id}", response_model=Dict[str, Any], summary="Get order by ID")
 async def get_order(
@@ -684,11 +1936,20 @@ async def get_order(
     include_items: bool = Query(True, description="Include order items"),
     include_timeline: bool = Query(False, description="Include order timeline"),
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_authenticated_user)
 ):
     """Get order details by ID"""
-    # TODO: Add authorization - customer can access own orders, seller can access their orders
+    # Get order first to check ownership
     result = db.get_order(order_id, include_items, include_timeline)
+    if not result['success']:
+        raise HTTPException(status_code=404, detail=result['error'])
+    
+    order = result['data']
+    # Customer can access own orders, seller can access their orders, admin can access all
+    if (current_user['role'] != 'admin' and 
+        order.get('customer_id') != current_user['id'] and 
+        order.get('seller_id') != current_user['id']):
+        raise HTTPException(status_code=403, detail="Access denied")
     if not result['success']:
         raise HTTPException(status_code=404, detail=result['error'])
     return result
@@ -699,10 +1960,10 @@ async def get_user_orders(
     limit: int = Query(20, description="Number of orders to return"),
     last_doc_id: Optional[str] = Query(None, description="Last document ID for pagination"),
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_authenticated_user)
 ):
     """Get all orders for a user"""
-    # TODO: Add authorization - users can only access their own orders
+    # Users can only access their own orders unless admin
     if current_user['id'] != user_id and current_user['role'] != 'admin':
         raise HTTPException(status_code=403, detail="Access denied")
     
@@ -717,10 +1978,13 @@ async def get_seller_orders(
     limit: int = Query(20, description="Number of orders to return"),
     last_doc_id: Optional[str] = Query(None, description="Last document ID for pagination"),
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_seller_or_admin)
 ):
     """Get all orders for a seller"""
-    # TODO: Add authorization - sellers can only access their own orders
+    # Sellers can only access their own orders unless admin
+    if current_user['role'] != 'admin' and current_user['id'] != seller_id:
+        raise HTTPException(status_code=403, detail="You can only access your own orders")
+    
     result = db.get_seller_orders(seller_id, limit, last_doc_id)
     if not result['success']:
         raise HTTPException(status_code=400, detail=result['error'])
@@ -731,10 +1995,19 @@ async def update_order_status(
     order_id: str = Path(..., description="Order ID"),
     status_data: OrderStatusUpdate = Body(...),
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_seller_or_admin)
 ):
     """Update order status"""
-    # TODO: Add authorization - seller or admin only
+    # Check if user is the seller for this order or admin
+    if current_user['role'] != 'admin':
+        order_result = db.get_order(order_id, include_items=False, include_timeline=False)
+        if not order_result['success']:
+            raise HTTPException(status_code=404, detail="Order not found")
+        
+        order = order_result['data']
+        if order.get('seller_id') != current_user['id']:
+            raise HTTPException(status_code=403, detail="You can only update orders you are selling")
+    
     result = db.update_order_status(
         order_id, 
         status_data.status, 
@@ -749,10 +2022,25 @@ async def cancel_order(
     order_id: str = Path(..., description="Order ID"),
     cancel_data: OrderCancel = Body(...),
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_authenticated_user)
 ):
     """Cancel an order"""
-    # TODO: Add authorization - customer can cancel pending orders, admin can cancel any
+    # Get order to check ownership and status
+    order_result = db.get_order(order_id, include_items=False, include_timeline=False)
+    if not order_result['success']:
+        raise HTTPException(status_code=404, detail="Order not found")
+    
+    order = order_result['data']
+    
+    # Customer can cancel their own pending orders, admin can cancel any
+    if current_user['role'] != 'admin':
+        if order.get('customer_id') != current_user['id']:
+            raise HTTPException(status_code=403, detail="You can only cancel your own orders")
+        
+        # Check if order is in a cancellable state
+        if order.get('status') not in ['pending', 'confirmed']:
+            raise HTTPException(status_code=400, detail="Order cannot be cancelled in current status")
+    
     result = db.cancel_order(order_id, cancel_data.reason, cancel_data.refund_amount)
     if not result['success']:
         raise HTTPException(status_code=400, detail=result['error'])
@@ -764,10 +2052,19 @@ async def add_order_timeline_event(
     event: str = Body(..., description="Event name"),
     details: str = Body(..., description="Event details"),
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_seller_or_admin)
 ):
     """Add a timeline event to an order"""
-    # TODO: Add authorization - seller or admin only
+    # Check if user is the seller for this order or admin
+    if current_user['role'] != 'admin':
+        order_result = db.get_order(order_id, include_items=False, include_timeline=False)
+        if not order_result['success']:
+            raise HTTPException(status_code=404, detail="Order not found")
+        
+        order = order_result['data']
+        if order.get('seller_id') != current_user['id']:
+            raise HTTPException(status_code=403, detail="You can only add timeline events to orders you are selling")
+    
     result = db.add_order_timeline_event(order_id, event, details, current_user['id'])
     if not result['success']:
         raise HTTPException(status_code=400, detail=result['error'])
@@ -776,6 +2073,7 @@ async def add_order_timeline_event(
 # ==================== CATEGORY ENDPOINTS ====================
 
 @app.get("/categories", response_model=Dict[str, Any], summary="List categories")
+@cached_response(ttl_seconds=1800, cache_key_params=['parent_id'])  # Cache for 30 minutes
 async def list_categories(
     parent_id: Optional[str] = Query(None, description="Parent category ID for subcategories"),
     db: FirestoreEcommerceDB = Depends(get_db)
@@ -823,163 +2121,22 @@ async def archive_category(
         raise HTTPException(status_code=400, detail=result['error'])
     return result
 
-# ==================== INVENTORY ENDPOINTS ====================
 
-@app.post("/inventory", response_model=Dict[str, Any], summary="Add inventory record")
-async def add_inventory_record(
-    inventory_data: InventoryCreate,
-    db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """Add new inventory record"""
-    # TODO: Add authorization - seller or admin only
-    result = db.add_inventory_record(inventory_data.dict())
-    if not result['success']:
-        raise HTTPException(status_code=400, detail=result['error'])
-    return result
 
-@app.patch("/inventory/{product_id}/{warehouse_id}", response_model=Dict[str, Any], summary="Update inventory")
-async def update_inventory_quantities(
-    product_id: str = Path(..., description="Product ID"),
-    warehouse_id: str = Path(..., description="Warehouse ID"),
-    inventory_update: InventoryUpdate = Body(...),
-    db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """Update inventory quantities"""
-    # TODO: Add authorization - seller or admin only
-    result = db.update_inventory_quantities(
-        product_id,
-        warehouse_id,
-        inventory_update.quantity_change,
-        inventory_update.movement_type,
-        inventory_update.notes
-    )
-    if not result['success']:
-        raise HTTPException(status_code=400, detail=result['error'])
-    return result
 
-@app.get("/products/{product_id}/inventory", response_model=Dict[str, Any], summary="Get product inventory")
-async def get_product_inventory(
-    product_id: str = Path(..., description="Product ID"),
-    db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """Get inventory for a product across all warehouses"""
-    # TODO: Add authorization - seller can view own products, admin can view all
-    result = db.get_product_inventory(product_id)
-    if not result['success']:
-        raise HTTPException(status_code=400, detail=result['error'])
-    return result
-
-@app.get("/inventory/low-stock", response_model=Dict[str, Any], summary="Get low stock items")
-async def get_low_stock_items(
-    limit: int = Query(50, description="Number of items to return"),
-    db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """Get low stock items"""
-    # TODO: Add authorization - seller can view own products, admin can view all
-    result = db.get_low_stock_items(limit)
-    if not result['success']:
-        raise HTTPException(status_code=400, detail=result['error'])
-    return result
-
-@app.get("/warehouses/{warehouse_id}/inventory", response_model=Dict[str, Any], summary="Get warehouse inventory")
-async def get_warehouse_inventory(
-    warehouse_id: str = Path(..., description="Warehouse ID"),
-    limit: int = Query(50, description="Number of items to return"),
-    last_doc_id: Optional[str] = Query(None, description="Last document ID for pagination"),
-    db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """Get inventory for a specific warehouse"""
-    # TODO: Add authorization - warehouse staff or admin only
-    result = db.get_warehouse_inventory(warehouse_id, limit, last_doc_id)
-    if not result['success']:
-        raise HTTPException(status_code=400, detail=result['error'])
-    return result
-
-# ==================== WAREHOUSE ENDPOINTS ====================
-
-@app.post("/warehouses", response_model=Dict[str, Any], summary="Create warehouse")
-async def create_warehouse(
-    warehouse_data: WarehouseCreate,
-    db: FirestoreEcommerceDB = Depends(get_db),
-    admin_user = Depends(require_admin)
-):
-    """Create a new warehouse (admin only)"""
-    result = db.create_warehouse(warehouse_data.dict())
-    if not result['success']:
-        raise HTTPException(status_code=400, detail=result['error'])
-    return result
-
-@app.get("/warehouses", response_model=Dict[str, Any], summary="List warehouses")
-async def list_warehouses(
-    active_only: bool = Query(True, description="Return only active warehouses"),
-    db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """List all warehouses"""
-    # TODO: Add authorization - admin or warehouse staff
-    result = db.list_warehouses(active_only)
-    if not result['success']:
-        raise HTTPException(status_code=400, detail=result['error'])
-    return result
-
-@app.get("/warehouses/{warehouse_id}", response_model=Dict[str, Any], summary="Get warehouse details")
-async def get_warehouse_details(
-    warehouse_id: str = Path(..., description="Warehouse ID"),
-    db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """Get warehouse details by ID"""
-    # TODO: Add authorization - admin or warehouse staff
-    result = db.get_warehouse_details(warehouse_id)
-    if not result['success']:
-        raise HTTPException(status_code=404, detail=result['error'])
-    return result
-
-@app.put("/warehouses/{warehouse_id}", response_model=Dict[str, Any], summary="Update warehouse")
-async def update_warehouse_details(
-    warehouse_id: str = Path(..., description="Warehouse ID"),
-    warehouse_data: Dict[str, Any] = Body(...),
-    db: FirestoreEcommerceDB = Depends(get_db),
-    admin_user = Depends(require_admin)
-):
-    """Update warehouse details (admin only)"""
-    result = db.update_warehouse_details(warehouse_id, warehouse_data)
-    if not result['success']:
-        raise HTTPException(status_code=400, detail=result['error'])
-    return result
 
 # ==================== CART ENDPOINTS ====================
 
-@app.post("/users/{user_id}/cart/initialize", response_model=Dict[str, Any], summary="Initialize cart")
-async def initialize_cart(
-    user_id: str = Path(..., description="User ID"),
-    db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """Initialize a cart for a user"""
-    # TODO: Add authorization - users can only initialize their own cart
-    if current_user['id'] != user_id and current_user['role'] != 'admin':
-        raise HTTPException(status_code=403, detail="Access denied")
-    
-    result = db.initialize_cart(user_id)
-    if not result['success']:
-        raise HTTPException(status_code=400, detail=result['error'])
-    return result
 
 @app.post("/users/{user_id}/cart/items", response_model=Dict[str, Any], summary="Add item to cart")
 async def add_item_to_cart(
     user_id: str = Path(..., description="User ID"),
     item_data: CartItemAdd = Body(...),
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_authenticated_user)
 ):
     """Add an item to cart"""
-    # TODO: Add authorization - users can only modify their own cart
+    # Users can only modify their own cart
     if current_user['id'] != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
     
@@ -994,10 +2151,10 @@ async def remove_item_from_cart(
     product_id: str = Path(..., description="Product ID"),
     variant_id: Optional[str] = Query(None, description="Variant ID"),
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_authenticated_user)
 ):
     """Remove an item from cart"""
-    # TODO: Add authorization - users can only modify their own cart
+    # Users can only modify their own cart
     if current_user['id'] != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
     
@@ -1012,10 +2169,10 @@ async def update_cart_item(
     product_id: str = Path(..., description="Product ID"),
     update_data: CartItemUpdate = Body(...),
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_authenticated_user)
 ):
     """Update quantity or variant of a cart item"""
-    # TODO: Add authorization - users can only modify their own cart
+    # Users can only modify their own cart
     if current_user['id'] != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
     
@@ -1028,10 +2185,10 @@ async def update_cart_item(
 async def get_user_cart(
     user_id: str = Path(..., description="User ID"),
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_authenticated_user)
 ):
     """Get cart for a user"""
-    # TODO: Add authorization - users can only access their own cart
+    # Users can only access their own cart
     if current_user['id'] != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
     
@@ -1044,10 +2201,10 @@ async def get_user_cart(
 async def clear_cart(
     user_id: str = Path(..., description="User ID"),
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_authenticated_user)
 ):
     """Clear/empty cart"""
-    # TODO: Add authorization - users can only clear their own cart
+    # Users can only clear their own cart
     if current_user['id'] != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
     
@@ -1062,10 +2219,14 @@ async def clear_cart(
 async def submit_review(
     review_data: ReviewCreate,
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_authenticated_user)
 ):
     """Submit a review for a product"""
-    # TODO: Add authorization - authenticated users only, must have purchased the product
+    # Ensure the user_id matches the authenticated user
+    if review_data.user_id != current_user['id']:
+        raise HTTPException(status_code=403, detail="You can only submit reviews for yourself")
+    
+    # Note: Purchase verification should be implemented in the database layer
     result = db.submit_review(review_data.dict())
     if not result['success']:
         raise HTTPException(status_code=400, detail=result['error'])
@@ -1091,10 +2252,10 @@ async def get_user_reviews(
     limit: int = Query(20, description="Number of reviews to return"),
     last_doc_id: Optional[str] = Query(None, description="Last document ID for pagination"),
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_authenticated_user)
 ):
     """Get reviews by user"""
-    # TODO: Add authorization - users can only access their own reviews
+    # Users can only access their own reviews unless admin
     if current_user['id'] != user_id and current_user['role'] != 'admin':
         raise HTTPException(status_code=403, detail="Access denied")
     
@@ -1108,10 +2269,11 @@ async def update_review(
     review_id: str = Path(..., description="Review ID"),
     review_data: ReviewUpdate = Body(...),
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_authenticated_user)
 ):
     """Update a review"""
-    # TODO: Add authorization - users can only update their own reviews within time limit
+    # Users can only update their own reviews within time limit
+    # The database method will handle ownership and time limit validation
     result = db.update_review(review_id, review_data.dict(exclude_unset=True), current_user['id'])
     if not result['success']:
         raise HTTPException(status_code=400, detail=result['error'])
@@ -1141,12 +2303,9 @@ async def moderate_review(
 async def create_notification(
     notification_data: NotificationCreate,
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_admin)
 ):
     """Create/send a notification to a user"""
-    # TODO: Add authorization - system or admin only
-    if current_user['role'] != 'admin':
-        raise HTTPException(status_code=403, detail="Admin access required")
     
     result = db.create_notification(notification_data.dict())
     if not result['success']:
@@ -1160,10 +2319,10 @@ async def get_user_notifications(
     limit: int = Query(20, description="Number of notifications to return"),
     last_doc_id: Optional[str] = Query(None, description="Last document ID for pagination"),
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_authenticated_user)
 ):
     """Get notifications for a user"""
-    # TODO: Add authorization - users can only access their own notifications
+    # Users can only access their own notifications
     if current_user['id'] != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
     
@@ -1176,73 +2335,17 @@ async def get_user_notifications(
 async def mark_notification_read(
     notification_id: str = Path(..., description="Notification ID"),
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_authenticated_user)
 ):
     """Mark notification as read"""
-    # TODO: Add authorization - users can only mark their own notifications as read
+    # Users can only mark their own notifications as read
+    # The database method will handle ownership validation
     result = db.mark_notification_read(notification_id, current_user['id'])
     if not result['success']:
         raise HTTPException(status_code=400, detail=result['error'])
     return result
 
-# ==================== SUPPLIER ENDPOINTS ====================
 
-@app.post("/suppliers", response_model=Dict[str, Any], summary="Add supplier")
-async def add_supplier(
-    supplier_data: SupplierCreate,
-    db: FirestoreEcommerceDB = Depends(get_db),
-    admin_user = Depends(require_admin)
-):
-    """Add a new supplier (admin only)"""
-    result = db.add_supplier(supplier_data.dict())
-    if not result['success']:
-        raise HTTPException(status_code=400, detail=result['error'])
-    return result
-
-@app.put("/suppliers/{supplier_id}", response_model=Dict[str, Any], summary="Update supplier")
-async def update_supplier_info(
-    supplier_id: str = Path(..., description="Supplier ID"),
-    supplier_data: Dict[str, Any] = Body(...),
-    db: FirestoreEcommerceDB = Depends(get_db),
-    admin_user = Depends(require_admin)
-):
-    """Update supplier info (admin only)"""
-    result = db.update_supplier_info(supplier_id, supplier_data)
-    if not result['success']:
-        raise HTTPException(status_code=400, detail=result['error'])
-    return result
-
-@app.get("/suppliers", response_model=Dict[str, Any], summary="List suppliers")
-async def list_suppliers(
-    active_only: bool = Query(True, description="Return only active suppliers"),
-    db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """List all suppliers"""
-    # TODO: Add authorization - admin or authorized personnel only
-    if current_user['role'] not in ['admin', 'manager']:
-        raise HTTPException(status_code=403, detail="Admin or manager access required")
-    
-    result = db.list_suppliers(active_only)
-    if not result['success']:
-        raise HTTPException(status_code=400, detail=result['error'])
-    return result
-
-@app.get("/suppliers/{supplier_id}", response_model=Dict[str, Any], summary="Get supplier by ID")
-async def get_supplier_by_id(
-    supplier_id: str = Path(..., description="Supplier ID"),
-    db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
-):
-    """Get supplier by ID"""
-    # TODO: Add authorization - admin or authorized personnel only
-    if current_user['role'] not in ['admin', 'manager']:
-        raise HTTPException(status_code=403, detail="Admin or manager access required")
-    
-    result = db.get_supplier_by_id(supplier_id)
-    if not result['success']:
-        raise HTTPException(status_code=404, detail=result['error'])
-    return result
 
 # ==================== DASHBOARD & ANALYTICS ENDPOINTS ====================
 
@@ -1250,12 +2353,16 @@ async def get_supplier_by_id(
 async def get_dashboard_stats(
     seller_id: Optional[str] = Query(None, description="Seller ID for seller-specific stats"),
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_seller_or_admin)
 ):
     """Get dashboard statistics"""
-    # TODO: Add authorization - admin can see all stats, sellers can see only their stats
-    if seller_id and current_user['role'] not in ['admin'] and current_user['id'] != seller_id:
+    # Admin can see all stats, sellers can see only their stats
+    if seller_id and current_user['role'] != 'admin' and current_user['id'] != seller_id:
         raise HTTPException(status_code=403, detail="Access denied")
+    
+    # If no seller_id specified and user is seller, default to their own stats
+    if not seller_id and current_user['role'] == 'seller':
+        seller_id = current_user['id']
     
     result = db.get_dashboard_stats(seller_id)
     if not result['success']:
@@ -1268,10 +2375,10 @@ async def get_sales_stats(
     start_date: datetime = Query(..., description="Start date for stats"),
     end_date: datetime = Query(..., description="End date for stats"),
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_seller_or_admin)
 ):
     """Get sales statistics for a seller"""
-    # TODO: Add authorization - sellers can only see their own stats, admin can see any seller's stats
+    # Sellers can only see their own stats, admin can see any seller's stats
     if current_user['role'] != 'admin' and current_user['id'] != seller_id:
         raise HTTPException(status_code=403, detail="Access denied")
     
@@ -1284,12 +2391,10 @@ async def get_sales_stats(
 async def get_low_stock_alerts(
     limit: int = Query(20, description="Number of alerts to return"),
     db: FirestoreEcommerceDB = Depends(get_db),
-    current_user = Depends(get_current_user)
+    current_user = Depends(require_manager_or_admin)
 ):
     """Get real-time low stock alerts"""
-    # TODO: Add authorization - admin or warehouse staff only
-    if current_user['role'] not in ['admin', 'warehouse_staff']:
-        raise HTTPException(status_code=403, detail="Admin or warehouse staff access required")
+    # Admin or warehouse managers can access low stock alerts
     
     result = db.get_low_stock_alerts(limit)
     if not result['success']:
@@ -1303,53 +2408,406 @@ async def favicon():
     """Handle favicon requests"""
     return JSONResponse(status_code=204, content=None)
 
-@app.post("/batch-operations", response_model=Dict[str, Any], summary="Batch operations")
-async def batch_operation(
-    operations: List[Dict[str, Any]] = Body(..., description="List of operations to perform"),
-    db: FirestoreEcommerceDB = Depends(get_db),
-    admin_user = Depends(require_admin)
-):
-    """Perform multiple operations in a single batch (admin only)"""
-    result = db.batch_operation(operations)
-    if not result['success']:
-        raise HTTPException(status_code=400, detail=result['error'])
-    return result
-
-@app.get("/health", response_model=Dict[str, Any], summary="Health check")
+@app.get("/health", response_model=Dict[str, Any], summary="Comprehensive health check")
 async def health_check(db: FirestoreEcommerceDB = Depends(get_db)):
-    """Database health check"""
-    result = db.health_check()
-    if not result['success']:
-        raise HTTPException(status_code=503, detail=result['error'])
-    return result
-
-# ==================== ERROR HANDLERS ====================
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request, exc):
-    """Custom HTTP exception handler"""
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={
-            "success": False,
-            "error": exc.detail,
-            "status_code": exc.status_code,
-            "timestamp": datetime.utcnow().isoformat()
+    """Comprehensive health check including database, cache, and system status"""
+    try:
+        health_data = {
+            "status": "healthy",
+            "timestamp": datetime.utcnow().isoformat(),
+            "version": "1.0.0",
+            "checks": {}
         }
+        
+        # Database health check
+        db_start = datetime.utcnow()
+        db_result = db.health_check()
+        db_time = (datetime.utcnow() - db_start).total_seconds()
+        
+        health_data["checks"]["database"] = {
+            "status": "healthy" if db_result['success'] else "unhealthy",
+            "response_time_ms": round(db_time * 1000, 2),
+            "details": db_result.get('message', 'Database connection successful')
+        }
+        
+        # Cache health check
+        cache_start = datetime.utcnow()
+        cache.set("health_check", {}, {"test": True})
+        cached_value = cache.get("health_check", {})
+        cache_time = (datetime.utcnow() - cache_start).total_seconds()
+        
+        health_data["checks"]["cache"] = {
+            "status": "healthy" if cached_value else "unhealthy",
+            "response_time_ms": round(cache_time * 1000, 2),
+            "cache_size": len(cache._cache)
+        }
+        
+        # System health
+        health_data["checks"]["system"] = {
+            "status": "healthy",
+            "uptime_seconds": (datetime.utcnow() - startup_time).total_seconds() if 'startup_time' in globals() else 0,
+            "memory_usage": "N/A"  # Could add psutil for memory monitoring
+        }
+        
+        # Overall status
+        all_healthy = all(check["status"] == "healthy" for check in health_data["checks"].values())
+        if not all_healthy:
+            health_data["status"] = "degraded"
+            return JSONResponse(
+                status_code=503,
+                content=health_data
+            )
+        
+        return create_success_response(
+            data=health_data,
+            message="All systems healthy"
+        )
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unhealthy",
+                "error": "Health check failed",
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        )
+
+# ==================== PERFORMANCE MONITORING ENDPOINTS ====================
+
+@app.get("/admin/cache/stats", response_model=Dict[str, Any], summary="Get cache statistics")
+async def get_cache_stats(current_user = Depends(require_admin)):
+    """Get detailed cache performance statistics - Admin only"""
+    try:
+        stats = cache.get_stats()
+        
+        return create_success_response(
+            data={
+                "cache_statistics": stats,
+                "cache_entries": len(cache._cache),
+                "memory_usage_estimate": len(str(cache._cache)),  # Rough estimate
+                "recommendations": {
+                    "hit_rate_status": "good" if stats["hit_rate_percent"] > 70 else "needs_improvement",
+                    "cache_size_status": "normal" if stats["cache_size"] < stats["max_size"] * 0.8 else "near_full"
+                }
+            },
+            message="Cache statistics retrieved successfully"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting cache stats: {str(e)}")
+        raise APIError(500, "Failed to retrieve cache statistics", "INTERNAL_ERROR")
+
+@app.post("/admin/cache/clear", response_model=Dict[str, Any], summary="Clear cache")
+async def clear_cache(
+    pattern: Optional[str] = Query(None, description="Pattern to match for selective clearing"),
+    current_user = Depends(require_admin)
+):
+    """Clear cache entries - Admin only"""
+    try:
+        if pattern:
+            cache.clear(pattern)
+            message = f"Cleared cache entries matching pattern: {pattern}"
+        else:
+            cache.clear()
+            message = "Cleared all cache entries"
+        
+        logger.info(f"Cache cleared by admin {current_user['id']}: {message}")
+        
+        return create_success_response(
+            message=message
+        )
+        
+    except Exception as e:
+        logger.error(f"Error clearing cache: {str(e)}")
+        raise APIError(500, "Failed to clear cache", "INTERNAL_ERROR")
+
+@app.get("/admin/performance/metrics", response_model=Dict[str, Any], summary="Get performance metrics")
+async def get_performance_metrics(current_user = Depends(require_admin)):
+    """Get system performance metrics - Admin only"""
+    try:
+        # Get cache stats
+        cache_stats = cache.get_stats()
+        
+        # Get connection pool stats (if available)
+        connection_stats = {
+            "active_connections": len(connection_pool._connections),
+            "max_connections": connection_pool.max_connections,
+            "connection_utilization": len(connection_pool._connections) / connection_pool.max_connections * 100
+        }
+        
+        # Calculate uptime
+        startup_time = globals().get('startup_time', datetime.utcnow())
+        uptime_seconds = (datetime.utcnow() - startup_time).total_seconds()
+        
+        performance_data = {
+            "cache_performance": cache_stats,
+            "connection_pool": connection_stats,
+            "system": {
+                "uptime_seconds": uptime_seconds,
+                "uptime_formatted": str(timedelta(seconds=int(uptime_seconds))),
+                "compression_enabled": True,  # GZip middleware is enabled
+                "async_operations": True
+            },
+            "recommendations": []
+        }
+        
+        # Add performance recommendations
+        if cache_stats["hit_rate_percent"] < 50:
+            performance_data["recommendations"].append({
+                "type": "cache",
+                "message": "Cache hit rate is low. Consider increasing TTL or reviewing cache strategy."
+            })
+        
+        if connection_stats["connection_utilization"] > 80:
+            performance_data["recommendations"].append({
+                "type": "connections",
+                "message": "Connection pool utilization is high. Consider increasing max_connections."
+            })
+        
+        return create_success_response(
+            data=performance_data,
+            message="Performance metrics retrieved successfully"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting performance metrics: {str(e)}")
+        raise APIError(500, "Failed to retrieve performance metrics", "INTERNAL_ERROR")
+
+# ==================== ENHANCED ERROR HANDLERS ====================
+
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+def get_request_context(request) -> Dict[str, Any]:
+    """Extract request context for error logging"""
+    return {
+        "method": request.method,
+        "url": str(request.url),
+        "client_ip": request.client.host if request.client else "unknown",
+        "user_agent": request.headers.get("user-agent", "unknown"),
+        "request_id": getattr(request.state, 'request_id', 'unknown')
+    }
+
+@app.exception_handler(RequestValidationError)
+async def enhanced_validation_exception_handler(request, exc: RequestValidationError):
+    """Enhanced Pydantic validation error handler with detailed logging"""
+    
+    request_context = get_request_context(request)
+    request_id = request_context.get('request_id', 'unknown')
+    
+    # Process validation errors
+    details = []
+    for error in exc.errors():
+        field = ".".join(str(x) for x in error["loc"][1:])  # Skip 'body' prefix
+        details.append({
+            "field": field,
+            "message": error["msg"],
+            "value": error.get("input"),
+            "type": error.get("type")
+        })
+    
+    # Log validation error with context
+    api_logger.warning(
+        f"[{request_id}] Validation error on {request.method} {request.url.path} - "
+        f"Fields: {[d['field'] for d in details]}"
     )
+    
+    response_content = {
+        "success": False,
+        "error": "Validation failed",
+        "error_code": "VALIDATION_ERROR",
+        "details": details,
+        "timestamp": datetime.utcnow().isoformat(),
+        "request_id": request_id
+    }
+    
+    return JSONResponse(status_code=422, content=response_content)
+
+@app.exception_handler(APIError)
+async def enhanced_api_exception_handler(request, exc: APIError):
+    """Enhanced custom API exception handler with context and logging"""
+    
+    request_context = get_request_context(request)
+    request_id = request_context.get('request_id', 'unknown')
+    
+    # Determine log level based on status code
+    if exc.status_code >= 500:
+        log_level = logging.ERROR
+    elif exc.status_code >= 400:
+        log_level = logging.WARNING
+    else:
+        log_level = logging.INFO
+    
+    # Log the API error with context
+    api_logger.log(
+        log_level,
+        f"[{request_id}] API Error {exc.status_code}: {exc.detail} - "
+        f"Code: {exc.error_code} - Context: {exc.context}"
+    )
+    
+    response_content = {
+        "success": False,
+        "error": exc.user_message,
+        "error_code": exc.error_code,
+        "timestamp": exc.timestamp,
+        "request_id": request_id
+    }
+    
+    # Include context in development/debug mode
+    if exc.context and logger.level <= logging.DEBUG:
+        response_content["context"] = exc.context
+    
+    return JSONResponse(status_code=exc.status_code, content=response_content)
+
+@app.exception_handler(StarletteHTTPException)
+async def enhanced_http_exception_handler(request, exc: StarletteHTTPException):
+    """Enhanced HTTP exception handler with improved error mapping"""
+    
+    request_context = get_request_context(request)
+    request_id = request_context.get('request_id', 'unknown')
+    
+    # Enhanced error code mapping
+    error_code_map = {
+        400: "BAD_REQUEST",
+        401: "AUTHENTICATION_ERROR", 
+        403: "AUTHORIZATION_ERROR",
+        404: "NOT_FOUND",
+        405: "METHOD_NOT_ALLOWED",
+        406: "NOT_ACCEPTABLE",
+        408: "REQUEST_TIMEOUT",
+        409: "CONFLICT",
+        410: "GONE",
+        413: "PAYLOAD_TOO_LARGE",
+        415: "UNSUPPORTED_MEDIA_TYPE",
+        422: "VALIDATION_ERROR",
+        429: "RATE_LIMIT_EXCEEDED",
+        500: "INTERNAL_ERROR",
+        501: "NOT_IMPLEMENTED",
+        502: "BAD_GATEWAY",
+        503: "SERVICE_UNAVAILABLE",
+        504: "GATEWAY_TIMEOUT"
+    }
+    
+    error_code = error_code_map.get(exc.status_code, f"HTTP_{exc.status_code}")
+    
+    # Log HTTP error
+    log_level = logging.ERROR if exc.status_code >= 500 else logging.WARNING
+    api_logger.log(
+        log_level,
+        f"[{request_id}] HTTP Error {exc.status_code}: {exc.detail} - "
+        f"Code: {error_code}"
+    )
+    
+    response_content = {
+        "success": False,
+        "error": exc.detail,
+        "error_code": error_code,
+        "timestamp": datetime.utcnow().isoformat(),
+        "request_id": request_id
+    }
+    
+    return JSONResponse(status_code=exc.status_code, content=response_content)
 
 @app.exception_handler(Exception)
-async def general_exception_handler(request, exc):
-    """General exception handler"""
-    logger.error(f"Unhandled exception: {str(exc)}")
-    return JSONResponse(
-        status_code=500,
-        content={
-            "success": False,
-            "error": "Internal server error",
-            "status_code": 500,
-            "timestamp": datetime.utcnow().isoformat()
+async def enhanced_general_exception_handler(request, exc: Exception):
+    """Enhanced general exception handler with detailed error tracking"""
+    
+    request_context = get_request_context(request)
+    request_id = request_context.get('request_id', 'unknown')
+    
+    # Generate error ID for tracking
+    error_id = str(uuid.uuid4())[:8]
+    
+    # Log detailed error information
+    api_logger.error(
+        f"[{request_id}] Unhandled exception (Error ID: {error_id}): {str(exc)} - "
+        f"Type: {type(exc).__name__} - Context: {request_context}",
+        exc_info=True
+    )
+    
+    # Log stack trace to separate error logger
+    logger.error(
+        f"[{request_id}] Full stack trace for Error ID {error_id}:",
+        exc_info=True
+    )
+    
+    response_content = {
+        "success": False,
+        "error": "Internal server error",
+        "error_code": "INTERNAL_ERROR",
+        "timestamp": datetime.utcnow().isoformat(),
+        "request_id": request_id,
+        "error_id": error_id
+    }
+    
+    # Include exception details in development mode
+    if logger.level <= logging.DEBUG:
+        response_content["debug_info"] = {
+            "exception_type": type(exc).__name__,
+            "exception_message": str(exc)
         }
+    
+    return JSONResponse(status_code=500, content=response_content)
+
+# ==================== ADDITIONAL ERROR HANDLERS ====================
+
+@app.exception_handler(DatabaseError)
+async def database_exception_handler(request, exc: DatabaseError):
+    """Handle database-specific errors"""
+    
+    request_context = get_request_context(request)
+    request_id = request_context.get('request_id', 'unknown')
+    
+    # Log database error with operation context
+    db_logger.error(
+        f"[{request_id}] Database error: {exc.detail} - "
+        f"Operation: {exc.context.get('operation', 'unknown')} - "
+        f"Collection: {exc.context.get('collection', 'unknown')}"
+    )
+    
+    response_content = {
+        "success": False,
+        "error": "Database operation failed",
+        "error_code": exc.error_code,
+        "timestamp": exc.timestamp,
+        "request_id": request_id
+    }
+    
+    return JSONResponse(status_code=exc.status_code, content=response_content)
+
+@app.exception_handler(RateLimitError)
+async def rate_limit_exception_handler(request, exc: RateLimitError):
+    """Handle rate limit errors with retry information"""
+    
+    request_context = get_request_context(request)
+    request_id = request_context.get('request_id', 'unknown')
+    
+    # Log rate limit hit
+    api_logger.warning(
+        f"[{request_id}] Rate limit exceeded for {request_context['client_ip']} - "
+        f"Endpoint: {request.method} {request.url.path}"
+    )
+    
+    response_content = {
+        "success": False,
+        "error": exc.detail,
+        "error_code": exc.error_code,
+        "timestamp": exc.timestamp,
+        "request_id": request_id
+    }
+    
+    # Add retry-after header if specified
+    headers = {}
+    if exc.context.get('retry_after'):
+        headers["Retry-After"] = str(exc.context['retry_after'])
+        response_content["retry_after"] = exc.context['retry_after']
+    
+    return JSONResponse(
+        status_code=exc.status_code, 
+        content=response_content,
+        headers=headers
     )
 
 # ==================== STARTUP EVENT ====================
@@ -1357,6 +2815,9 @@ async def general_exception_handler(request, exc):
 @app.on_event("startup")
 async def startup_event():
     """Initialize application on startup"""
+    global startup_time
+    startup_time = datetime.utcnow()
+    
     logger.info("FastAPI E-commerce server starting up...")
     
     # Test database connection
@@ -1369,16 +2830,14 @@ async def startup_event():
             logger.error(f"Database connection failed: {health_result['error']}")
     except Exception as e:
         logger.error(f"Failed to connect to database: {e}")
+    
+    # Initialize cache
+    cache.clear()
+    logger.info("Cache initialized")
+    
+    logger.info("FastAPI E-commerce server startup complete")
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "fastapi_ecommerce_server:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
-    )
+
 
 """
 ==================== RUNNING THE SERVER ====================

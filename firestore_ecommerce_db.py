@@ -55,6 +55,132 @@ class FirestoreEcommerceDB:
             'timestamp': datetime.utcnow().isoformat()
         }
 
+    def _optimize_query_with_index(self, collection_name: str, filters: List[Tuple], order_by: List[Tuple] = None) -> firestore.Query:
+        """
+        Create optimized Firestore query with proper indexing and performance monitoring
+        
+        Args:
+            collection_name: Name of the collection
+            filters: List of (field, operator, value) tuples
+            order_by: List of (field, direction) tuples
+        
+        Returns:
+            Optimized Firestore query
+        """
+        query = self.db.collection(collection_name)
+        
+        # Apply filters in optimal order for Firestore indexing
+        # Order: equality filters, range filters, array filters, ordering
+        equality_filters = []
+        range_filters = []
+        array_filters = []
+        in_filters = []
+        
+        for field, operator, value in filters:
+            if operator == '==':
+                equality_filters.append((field, operator, value))
+            elif operator in ['<', '<=', '>', '>=', '!=']:
+                range_filters.append((field, operator, value))
+            elif operator in ['array-contains', 'array-contains-any']:
+                array_filters.append((field, operator, value))
+            elif operator in ['in', 'not-in']:
+                in_filters.append((field, operator, value))
+            else:
+                # Default to equality for unknown operators
+                equality_filters.append((field, operator, value))
+        
+        # Apply filters in optimal order for composite indexes
+        # 1. Equality filters first (best for composite indexes)
+        for field, operator, value in equality_filters:
+            query = query.where(filter=FieldFilter(field, operator, value))
+        
+        # 2. IN filters (treated as equality by Firestore)
+        for field, operator, value in in_filters:
+            query = query.where(filter=FieldFilter(field, operator, value))
+        
+        # 3. Range filters (only one range filter per query allowed)
+        if range_filters:
+            # Use only the first range filter to avoid index conflicts
+            field, operator, value = range_filters[0]
+            query = query.where(filter=FieldFilter(field, operator, value))
+            
+            if len(range_filters) > 1:
+                logger.warning(f"Multiple range filters detected for {collection_name}. Only using first one: {field} {operator}")
+        
+        # 4. Array filters last (most expensive)
+        for field, operator, value in array_filters:
+            query = query.where(filter=FieldFilter(field, operator, value))
+        
+        # 5. Apply ordering (must match index field order)
+        if order_by:
+            for field, direction in order_by:
+                query = query.order_by(field, direction=direction)
+        
+        return query
+
+    def _paginate_query(self, query: firestore.Query, limit: int, last_doc_id: str = None) -> Tuple[firestore.Query, bool]:
+        """
+        Add pagination to query with cursor-based approach and performance optimization
+        
+        Args:
+            query: Base Firestore query
+            limit: Number of documents to return
+            last_doc_id: ID of last document from previous page
+        
+        Returns:
+            Tuple of (paginated_query, has_cursor)
+        """
+        # Optimize limit for better performance
+        effective_limit = min(limit + 1, 100)  # Cap at 100 to prevent large queries
+        paginated_query = query.limit(effective_limit)
+        
+        if last_doc_id:
+            try:
+                # Get the collection name from the query
+                collection_name = query._parent.id if hasattr(query, '_parent') else 'products'
+                last_doc = self.db.collection(collection_name).document(last_doc_id).get()
+                if last_doc.exists:
+                    paginated_query = paginated_query.start_after(last_doc)
+                    return paginated_query, True
+            except Exception as e:
+                logger.warning(f"Failed to use cursor pagination: {e}")
+        
+        return paginated_query, False
+
+    def _execute_query_with_monitoring(self, query: firestore.Query, operation_name: str) -> Tuple[List[Any], float]:
+        """
+        Execute Firestore query with performance monitoring
+        
+        Args:
+            query: Firestore query to execute
+            operation_name: Name of the operation for logging
+        
+        Returns:
+            Tuple of (results, execution_time_seconds)
+        """
+        start_time = datetime.utcnow()
+        
+        try:
+            # Execute query
+            docs = list(query.stream())
+            
+            # Calculate execution time
+            execution_time = (datetime.utcnow() - start_time).total_seconds()
+            
+            # Log performance metrics
+            logger.info(f"Query '{operation_name}' executed in {execution_time:.3f}s, returned {len(docs)} documents")
+            
+            # Log warning for slow queries
+            if execution_time > 2.0:
+                logger.warning(f"Slow query detected: '{operation_name}' took {execution_time:.3f}s")
+            
+            return docs, execution_time
+            
+        except Exception as e:
+            execution_time = (datetime.utcnow() - start_time).total_seconds()
+            logger.error(f"Query '{operation_name}' failed after {execution_time:.3f}s: {str(e)}")
+            raise e
+
     # ==================== USERS OPERATIONS ====================
     
     def create_user_profile(self, user_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -252,79 +378,190 @@ class FirestoreEcommerceDB:
         """
         Fetch products with optional filters: category, subcategory, tags, price range, sellerId
         Security: Public read access
+        Uses optimized query strategy with fallback for missing indexes
         """
         try:
+            # Start with base query - always filter by status first (has single-field index)
             query = self.db.collection('products')
+            status = filters.get('status', 'active') if filters else 'active'
+            query = query.where(filter=FieldFilter('status', '==', status))
             
+            # Apply additional filters in optimal order for indexing
             if filters:
+                # Apply equality filters first (better for composite indexes)
                 if 'category_id' in filters:
                     query = query.where(filter=FieldFilter('category_id', '==', filters['category_id']))
                 if 'subcategory_id' in filters:
                     query = query.where(filter=FieldFilter('subcategory_id', '==', filters['subcategory_id']))
                 if 'seller_id' in filters:
                     query = query.where(filter=FieldFilter('seller_id', '==', filters['seller_id']))
+                
+                # Apply range filters (Firestore allows multiple range filters on same field)
                 if 'min_price' in filters:
                     query = query.where(filter=FieldFilter('price', '>=', filters['min_price']))
                 if 'max_price' in filters:
                     query = query.where(filter=FieldFilter('price', '<=', filters['max_price']))
+                
+                # Apply array filters last (most expensive)
                 if 'tags' in filters and filters['tags']:
-                    query = query.where(filter=FieldFilter('tags', 'array_contains_any', filters['tags']))
+                    if isinstance(filters['tags'], list):
+                        query = query.where(filter=FieldFilter('tags', 'array_contains_any', filters['tags']))
+                    else:
+                        query = query.where(filter=FieldFilter('tags', 'array_contains', filters['tags']))
             
-            query = query.limit(limit).order_by('created_at', direction=firestore.Query.DESCENDING)
+            # Add ordering and pagination
+            query = query.order_by('created_at', direction=firestore.Query.DESCENDING)
+            query = query.limit(limit)
             
             if last_doc_id:
-                last_doc = self.db.collection('products').document(last_doc_id).get()
-                if last_doc.exists:
-                    query = query.start_after(last_doc)
+                try:
+                    last_doc = self.db.collection('products').document(last_doc_id).get()
+                    if last_doc.exists:
+                        query = query.start_after(last_doc)
+                except Exception as e:
+                    logger.warning(f"Failed to use cursor pagination: {e}")
             
-            docs = query.stream()
-            products = []
-            last_doc = None
-            
-            for doc in docs:
-                product_data = doc.to_dict()
-                products.append(product_data)
-                last_doc = doc
-            
-            return self._success_response({
-                'products': products,
-                'last_doc_id': last_doc.id if last_doc else None,
-                'has_more': len(products) == limit
-            })
+            # Execute query with error handling for missing indexes
+            try:
+                docs = list(query.stream())
+                products = []
+                last_doc = None
+                
+                for doc in docs:
+                    product_data = doc.to_dict()
+                    product_data['id'] = doc.id  # Add document ID
+                    products.append(product_data)
+                    last_doc = doc
+                
+                return self._success_response({
+                    'products': products,
+                    'last_doc_id': last_doc.id if last_doc else None,
+                    'has_more': len(products) == limit,
+                    'filters_applied': filters or {}
+                })
+                
+            except Exception as query_error:
+                if "requires an index" in str(query_error):
+                    # Fallback to simpler query
+                    logger.warning(f"Complex query failed, using fallback: {query_error}")
+                    return self._execute_simple_product_query(filters, limit, last_doc_id)
+                else:
+                    raise query_error
             
         except Exception as e:
             return self._handle_error("get_products_with_filters", e)
+    
+    def _execute_simple_product_query(self, filters: Dict[str, Any], limit: int, last_doc_id: str = None) -> Dict[str, Any]:
+        """
+        Fallback query for when complex indexes are missing
+        Uses only basic filters and client-side filtering
+        """
+        try:
+            # Use only status filter (guaranteed to have single-field index)
+            query = self.db.collection('products')
+            status = filters.get('status', 'active') if filters else 'active'
+            query = query.where(filter=FieldFilter('status', '==', status))
+            query = query.order_by('created_at', direction=firestore.Query.DESCENDING)
+            query = query.limit(limit * 3)  # Get more results for client-side filtering
+            
+            docs = list(query.stream())
+            
+            # Apply additional filters client-side
+            filtered_products = []
+            for doc in docs:
+                product_data = doc.to_dict()
+                product_data['id'] = doc.id
+                
+                # Apply client-side filters
+                if self._product_matches_filters(product_data, filters):
+                    filtered_products.append(product_data)
+                    if len(filtered_products) >= limit:
+                        break
+            
+            return self._success_response({
+                'products': filtered_products,
+                'last_doc_id': filtered_products[-1]['id'] if filtered_products else None,
+                'has_more': len(filtered_products) == limit,
+                'filters_applied': filters or {},
+                'fallback_used': True
+            })
+            
+        except Exception as e:
+            raise e
+    
+    def _product_matches_filters(self, product_data: Dict[str, Any], filters: Dict[str, Any]) -> bool:
+        """
+        Check if product matches filters (client-side filtering)
+        """
+        if not filters:
+            return True
+        
+        # Check category
+        if 'category_id' in filters and product_data.get('category_id') != filters['category_id']:
+            return False
+        
+        # Check subcategory
+        if 'subcategory_id' in filters and product_data.get('subcategory_id') != filters['subcategory_id']:
+            return False
+        
+        # Check seller
+        if 'seller_id' in filters and product_data.get('seller_id') != filters['seller_id']:
+            return False
+        
+        # Check price range
+        price = product_data.get('price', 0)
+        if 'min_price' in filters and price < filters['min_price']:
+            return False
+        if 'max_price' in filters and price > filters['max_price']:
+            return False
+        
+        # Check tags
+        if 'tags' in filters and filters['tags']:
+            product_tags = product_data.get('tags', [])
+            filter_tags = filters['tags'] if isinstance(filters['tags'], list) else [filters['tags']]
+            if not any(tag in product_tags for tag in filter_tags):
+                return False
+        
+        return True
 
     def get_active_products(self, limit: int = 20, last_doc_id: str = None) -> Dict[str, Any]:
         """
-        Fetch all active products (status=='active')
+        Fetch all active products (status=='active') with optimized query and performance monitoring
         Security: Public read access
+        Uses index: products (status ASC, created_at DESC)
         """
         try:
-            query = (self.db.collection('products')
-                    .where(filter=FieldFilter('status', '==', 'active'))
-                    .limit(limit)
-                    .order_by('created_at', direction=firestore.Query.DESCENDING))
+            # Create optimized query with proper indexing
+            filters = [('status', '==', 'active')]
+            order_by = [('created_at', firestore.Query.DESCENDING)]
             
-            if last_doc_id:
-                last_doc = self.db.collection('products').document(last_doc_id).get()
-                if last_doc.exists:
-                    query = query.start_after(last_doc)
+            base_query = self._optimize_query_with_index('products', filters, order_by)
+            paginated_query, _ = self._paginate_query(base_query, limit, last_doc_id)
             
-            docs = query.stream()
+            # Execute query with performance monitoring
+            docs, execution_time = self._execute_query_with_monitoring(paginated_query, 'get_active_products')
+            
+            # Check if there are more results
+            has_more = len(docs) > limit
+            if has_more:
+                docs = docs[:limit]  # Remove the extra document
+            
+            # Process results
             products = []
-            last_doc = None
-            
             for doc in docs:
                 product_data = doc.to_dict()
+                product_data['id'] = doc.id  # Add document ID
+                
+                # Remove sensitive fields for public access
+                product_data.pop('seller_email', None)
+                product_data.pop('cost_price', None)
+                
                 products.append(product_data)
-                last_doc = doc
             
-            return self._success_response({
-                'products': products,
-                'last_doc_id': last_doc.id if last_doc else None,
-                'has_more': len(products) == limit
-            })
+            return self._success_response(
+                data=products,
+                message=f"Retrieved {len(products)} active products in {execution_time:.3f}s"
+            )
             
         except Exception as e:
             return self._handle_error("get_active_products", e)
@@ -1098,13 +1335,15 @@ class FirestoreEcommerceDB:
             cart_ref = self.db.collection('carts').document(user_id)
             
             # Use transaction for atomic updates
-            transaction = self.db.transaction()
-            
             @firestore.transactional
             def add_item_transaction(transaction):
+                # Get cart document within transaction
                 cart_doc = transaction.get(cart_ref)
                 
-                if not cart_doc.exists:
+                # Check if cart exists
+                cart_exists = cart_doc.exists if hasattr(cart_doc, 'exists') else False
+                
+                if not cart_exists:
                     # Initialize cart if it doesn't exist
                     cart_data = {
                         'user_id': user_id,
@@ -1116,11 +1355,9 @@ class FirestoreEcommerceDB:
                     }
                     transaction.set(cart_ref, cart_data)
                     current_items = []
-                    current_total = 0.0
                 else:
-                    cart_data = cart_doc.to_dict()
+                    cart_data = cart_doc.to_dict() if hasattr(cart_doc, 'to_dict') else {}
                     current_items = cart_data.get('items', [])
-                    current_total = cart_data.get('total_amount', 0.0)
                 
                 # Check if item already exists in cart
                 item_exists = False
@@ -1134,21 +1371,32 @@ class FirestoreEcommerceDB:
                 
                 if not item_exists:
                     # Add new item
-                    item_data['added_at'] = firestore.SERVER_TIMESTAMP
-                    current_items.append(item_data)
+                    new_item = item_data.copy()
+                    # Don't add SERVER_TIMESTAMP to item data in transaction
+                    current_items.append(new_item)
                 
                 # Recalculate totals
                 total_items = sum(item.get('quantity', 0) for item in current_items)
                 total_amount = sum(item.get('price', 0) * item.get('quantity', 0) for item in current_items)
                 
-                # Update cart
-                transaction.update(cart_ref, {
+                # Update or set cart data
+                update_data = {
                     'items': current_items,
                     'total_items': total_items,
                     'total_amount': total_amount,
                     'updated_at': firestore.SERVER_TIMESTAMP
-                })
+                }
+                
+                if cart_exists:
+                    transaction.update(cart_ref, update_data)
+                else:
+                    # If cart was just created, merge the update data
+                    update_data['user_id'] = user_id
+                    update_data['created_at'] = firestore.SERVER_TIMESTAMP
+                    transaction.set(cart_ref, update_data)
             
+            # Execute transaction
+            transaction = self.db.transaction()
             add_item_transaction(transaction)
             
             logger.info(f"Item added to cart for user: {user_id}")
@@ -1165,16 +1413,17 @@ class FirestoreEcommerceDB:
         try:
             cart_ref = self.db.collection('carts').document(user_id)
             
-            transaction = self.db.transaction()
-            
             @firestore.transactional
             def remove_item_transaction(transaction):
                 cart_doc = transaction.get(cart_ref)
                 
-                if not cart_doc.exists:
+                # Check if cart exists
+                cart_exists = cart_doc.exists if hasattr(cart_doc, 'exists') else False
+                
+                if not cart_exists:
                     raise Exception("Cart not found")
                 
-                cart_data = cart_doc.to_dict()
+                cart_data = cart_doc.to_dict() if hasattr(cart_doc, 'to_dict') else {}
                 current_items = cart_data.get('items', [])
                 
                 # Remove item
@@ -1196,6 +1445,8 @@ class FirestoreEcommerceDB:
                     'updated_at': firestore.SERVER_TIMESTAMP
                 })
             
+            # Execute transaction
+            transaction = self.db.transaction()
             remove_item_transaction(transaction)
             
             logger.info(f"Item removed from cart for user: {user_id}")
@@ -1208,47 +1459,41 @@ class FirestoreEcommerceDB:
         """
         Update quantity or variant of a cart item
         Security: Users can only modify their own cart
+        Note: Uses non-transactional update for simplicity since cart operations are less critical
         """
         try:
             cart_ref = self.db.collection('carts').document(user_id)
             
-            transaction = self.db.transaction()
+            # Get current cart data
+            cart_doc = cart_ref.get()
+            if not cart_doc.exists:
+                return self._handle_error("update_cart_item", Exception("Cart not found"))
             
-            @firestore.transactional
-            def update_item_transaction(transaction):
-                cart_doc = transaction.get(cart_ref)
-                
-                if not cart_doc.exists:
-                    raise Exception("Cart not found")
-                
-                cart_data = cart_doc.to_dict()
-                current_items = cart_data.get('items', [])
-                
-                # Find and update item
-                item_found = False
-                for item in current_items:
-                    if item.get('product_id') == product_id:
-                        item.update(update_data)
-                        item['updated_at'] = firestore.SERVER_TIMESTAMP
-                        item_found = True
-                        break
-                
-                if not item_found:
-                    raise Exception("Item not found in cart")
-                
-                # Recalculate totals
-                total_items = sum(item.get('quantity', 0) for item in current_items)
-                total_amount = sum(item.get('price', 0) * item.get('quantity', 0) for item in current_items)
-                
-                # Update cart
-                transaction.update(cart_ref, {
-                    'items': current_items,
-                    'total_items': total_items,
-                    'total_amount': total_amount,
-                    'updated_at': firestore.SERVER_TIMESTAMP
-                })
+            cart_data = cart_doc.to_dict()
+            current_items = cart_data.get('items', [])
             
-            update_item_transaction(transaction)
+            # Find and update item
+            item_found = False
+            for item in current_items:
+                if item.get('product_id') == product_id:
+                    item.update(update_data)
+                    item_found = True
+                    break
+            
+            if not item_found:
+                return self._handle_error("update_cart_item", Exception("Item not found in cart"))
+            
+            # Recalculate totals
+            total_items = sum(item.get('quantity', 0) for item in current_items)
+            total_amount = sum(item.get('price', 0) * item.get('quantity', 0) for item in current_items)
+            
+            # Update cart with new data
+            cart_ref.update({
+                'items': current_items,
+                'total_items': total_items,
+                'total_amount': total_amount,
+                'updated_at': firestore.SERVER_TIMESTAMP
+            })
             
             logger.info(f"Cart item updated for user: {user_id}")
             return self._success_response(message="Cart item updated successfully")
