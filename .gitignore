@@ -87,7 +87,9 @@ test_*.html
 frontend*
 gitignore_update*
 start_server.py
-
+authentication_audit_report.md 
+endpoint_authorization_analysis.md
+openapi_schema_analysis.md
 # Test files and results (specific to this project)
 comprehensive_api_test.py
 comprehensive_backend_test.py
