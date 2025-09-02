@@ -213,3 +213,6 @@ openapi_enhancements.py
 .dmypy.json
 dmypy.json
 
+
+firestore_secure.rules 
+updated_firestore_rules_analysis.md
