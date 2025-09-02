@@ -1,8 +1,21 @@
 """
-FastAPI E-commerce Server
+FastAPI E-commerce Server with Optimized Authentication
 Converts FirestoreEcommerceDB class methods into RESTful API endpoints
 
-Run with: uvicorn main:app --reload --host 0.0.0.0 --port 8000
+Features:
+- Clean Swagger UI without redundant authorization parameters
+- Centralized authentication through global "Authorize" button
+- Firebase ID token verification with role-based access control
+- Clear distinction between public (🌐) and protected (🔒) endpoints
+
+Authentication:
+- Public endpoints: No authentication required
+- Protected endpoints: Use global "Authorize" button in Swagger UI
+- Set token once: Bearer <your-firebase-token>
+- Token automatically applied to all protected endpoints
+
+Run with: python start_server.py (default port 8001)
+API Documentation: http://localhost:8001/docs
 """
 
 from fastapi import FastAPI, HTTPException, Depends, Query, Path, Body, Header, Request
@@ -494,41 +507,177 @@ async def cleanup_cache_periodically():
         if removed_count > 0:
             logger.info(f"Cleaned up {removed_count} expired cache entries")
 
-# Custom OpenAPI schema with selective authorization
-def custom_openapi():
-    if app.openapi_schema:
-        return app.openapi_schema
-    openapi_schema = get_openapi(
-        title=app.title,
-        version=app.version,
-        description=app.description,
-        routes=app.routes,
-    )
-    openapi_schema["components"]["securitySchemes"] = {
-        "BearerAuth": {
-            "type": "http",
-            "scheme": "bearer",
-            "bearerFormat": "JWT",
-        }
-    }
+# Helper function to determine if endpoint should be public or protected
+def is_public_endpoint(path: str, method: str = None) -> bool:
+    """
+    Determine if an endpoint should be public (no authentication required)
     
-    # Public endpoints that don't require authentication
-    public_endpoints = [
+    Args:
+        path: The endpoint path
+        method: HTTP method (optional, for future method-specific logic)
+    
+    Returns:
+        bool: True if endpoint should be public, False if protected
+    """
+    # Normalize path by removing trailing slashes for consistent matching
+    normalized_path = path.rstrip('/')
+    
+    # Define public endpoint patterns
+    public_patterns = [
         "/products/featured",
         "/products/active", 
         "/products/search",
         "/products/popular",
         "/products/{product_id}",
         "/categories",
-        "/health"
+        "/health",
+        "/docs",
+        "/redoc",
+        "/openapi.json"
     ]
     
-    # Add authentication requirement only to non-public endpoints
-    for path, path_item in openapi_schema["paths"].items():
-        for operation in path_item.values():
-            if not any(public_path in path for public_path in public_endpoints):
-                operation["security"] = [{"BearerAuth": []}]
+    # Check exact matches first
+    if normalized_path in public_patterns:
+        return True
     
+    # Check pattern matches for parameterized paths
+    for pattern in public_patterns:
+        if "{" in pattern:
+            # Convert OpenAPI path parameter format to regex-like matching
+            pattern_regex = pattern.replace("{", "").replace("}", "")
+            if pattern_regex in normalized_path and normalized_path.count("/") == pattern.count("/"):
+                return True
+    
+    # Special cases for specific path patterns
+    if normalized_path.startswith("/products/") and normalized_path.count("/") == 2:
+        # Matches /products/{product_id} pattern - but not /products/ or /products
+        path_parts = normalized_path.split("/")
+        if len(path_parts) == 3 and path_parts[2]:  # Ensure there's actually a product ID
+            return True
+    
+    return False
+
+def validate_endpoint_security_requirements(openapi_schema: dict) -> list:
+    """
+    Validate that public endpoints don't have security requirements
+    and protected endpoints do have them
+    
+    Args:
+        openapi_schema: The OpenAPI schema dictionary
+    
+    Returns:
+        list: List of validation issues found
+    """
+    issues = []
+    
+    for path, path_item in openapi_schema["paths"].items():
+        for method, operation in path_item.items():
+            if isinstance(operation, dict):
+                is_public = is_public_endpoint(path, method)
+                has_security = "security" in operation and operation["security"]
+                
+                if is_public and has_security:
+                    issues.append(f"Public endpoint {method.upper()} {path} has security requirements")
+                elif not is_public and not has_security:
+                    issues.append(f"Protected endpoint {method.upper()} {path} missing security requirements")
+    
+    return issues
+
+# Custom OpenAPI schema with selective authorization
+def custom_openapi():
+    """
+    Enhanced OpenAPI schema generation with clean authentication structure.
+    
+    This function ensures:
+    1. Security is defined only at operation level, not parameter level
+    2. Authorization parameters are excluded from endpoint parameter lists
+    3. BearerAuth security scheme is properly configured
+    4. Public endpoints don't have security requirements
+    5. Protected endpoints have proper BearerAuth security requirements
+    
+    Requirements satisfied: 1.1, 1.4
+    """
+    if app.openapi_schema:
+        return app.openapi_schema
+    
+    # Generate base OpenAPI schema
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    
+    # Ensure components section exists
+    if "components" not in openapi_schema:
+        openapi_schema["components"] = {}
+    
+    # Configure security schemes with proper BearerAuth configuration
+    openapi_schema["components"]["securitySchemes"] = {
+        "BearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT",
+            "description": "Firebase ID Token - Use the global 'Authorize' button to set your token"
+        }
+    }
+    
+    # Track statistics for logging
+    auth_params_removed = 0
+    protected_endpoints_configured = 0
+    public_endpoints_configured = 0
+    
+    # Process each path and operation to optimize authentication
+    for path, path_item in openapi_schema["paths"].items():
+        for method, operation in path_item.items():
+            if isinstance(operation, dict):
+                # Remove any authorization parameters from the parameters list
+                if "parameters" in operation:
+                    original_param_count = len(operation["parameters"])
+                    operation["parameters"] = [
+                        param for param in operation["parameters"]
+                        if not (
+                            param.get("name") in ["authorization", "Authorization"] and 
+                            param.get("in") == "header"
+                        )
+                    ]
+                    # Track removed parameters
+                    removed_count = original_param_count - len(operation["parameters"])
+                    auth_params_removed += removed_count
+                    
+                    # Remove empty parameters list
+                    if not operation["parameters"]:
+                        del operation["parameters"]
+                
+                # Determine if this endpoint should be public or protected
+                if not is_public_endpoint(path, method):
+                    # Add security requirement for protected endpoints
+                    operation["security"] = [{"BearerAuth": []}]
+                    protected_endpoints_configured += 1
+                    
+                    # Ensure operation has proper summary indicating authentication requirement
+                    if "summary" in operation and "🔒" not in operation["summary"]:
+                        operation["summary"] = f"🔒 {operation['summary']}"
+                else:
+                    # Ensure public endpoints don't have security requirements
+                    operation.pop("security", None)
+                    public_endpoints_configured += 1
+                    
+                    # Ensure operation has proper summary indicating public access
+                    if "summary" in operation and "🌐" not in operation["summary"]:
+                        operation["summary"] = f"🌐 {operation['summary']}"
+    
+    # Validate endpoint security configuration
+    validation_issues = validate_endpoint_security_requirements(openapi_schema)
+    if validation_issues:
+        logger.warning(f"OpenAPI security validation issues found: {validation_issues}")
+    else:
+        logger.info(f"OpenAPI schema optimized successfully: "
+                   f"{auth_params_removed} auth parameters removed, "
+                   f"{protected_endpoints_configured} protected endpoints configured, "
+                   f"{public_endpoints_configured} public endpoints configured")
+    
+    # Cache the optimized schema
     app.openapi_schema = openapi_schema
     return app.openapi_schema
 
@@ -545,11 +694,24 @@ def get_db() -> FirestoreEcommerceDB:
     """Dependency to get optimized Firestore database instance"""
     return get_db_instance()
 
-async def get_current_user(authorization: str = Header(None)):
+async def get_current_user(request: Request):
     """
-    Firebase Authentication dependency
-    Verifies Firebase ID token and retrieves user data from Firestore
+    Optimized Firebase Authentication dependency for centralized authentication.
+    
+    This function provides:
+    - Centralized authentication through dependency injection
+    - Clean Swagger UI without individual authorization parameters
+    - Consistent token validation across all protected endpoints
+    - Proper error handling with meaningful messages
+    
+    Usage:
+    - Protected endpoints use: Depends(get_current_user)
+    - Users authenticate once via global "Authorize" button in Swagger UI
+    - Token is automatically applied to all protected endpoints
+    
+    Requirements satisfied: 2.1, 2.2, 2.3, 3.1, 3.2, 3.3
     """
+    authorization = request.headers.get("authorization")
     if not authorization:
         log_security_event(
             event_type="missing_authorization_header",
@@ -2838,162 +3000,3 @@ async def startup_event():
     logger.info("FastAPI E-commerce server startup complete")
 
 
-
-"""
-==================== RUNNING THE SERVER ====================
-
-1. Install dependencies:
-   pip install fastapi uvicorn python-multipart
-
-2. Set environment variables:
-   export FIRESTORE_PROJECT_ID=your-project-id
-   export GOOGLE_APPLICATION_CREDENTIALS=path/to/service-account.json
-
-3. Run the server:
-   uvicorn main:app --reload --host 0.0.0.0 --port 8000
-
-4. Access the API:
-   - Swagger UI: http://localhost:8000/docs
-   - ReDoc: http://localhost:8000/redoc
-   - Health check: http://localhost:8000/health
-
-==================== EXAMPLE API CALLS ====================
-
-# Get all products
-GET /products?limit=20&category_id=electronics
-
-# Create a new user
-POST /users
-{
-    "email": "user@example.com",
-    "name": "John Doe",
-    "role": "customer"
-}
-
-# Add item to cart
-POST /users/user123/cart/items
-{
-    "product_id": "prod123",
-    "quantity": 2,
-    "price": 29.99
-}
-
-# Create an order
-POST /orders
-{
-    "customer_id": "user123",
-    "seller_id": "seller456",
-    "items": [
-        {
-            "product_id": "prod123",
-            "quantity": 2,
-            "price": 29.99
-        }
-    ],
-    "total_amount": 59.98,
-    "shipping_address": {
-        "street": "123 Main St",
-        "city": "Anytown",
-        "state": "CA",
-        "zip": "12345"
-    }
-}
-
-# Search products
-GET /products/search?q=laptop&limit=10
-
-# Get user orders
-GET /users/user123/orders?limit=20
-
-# Update order status
-PATCH /orders/order123/status
-{
-    "status": "shipped",
-    "fulfillment_details": {
-        "tracking_number": "1234567890",
-        "carrier": "UPS"
-    }
-}
-
-==================== AUTHENTICATION SETUP ====================
-
-To implement real authentication, replace the mock `get_current_user()` function with:
-
-1. Firebase Auth:
-   - Install: pip install firebase-admin
-   - Verify Firebase ID tokens
-   - Extract user info from token
-
-2. JWT Tokens:
-   - Install: pip install python-jose[cryptography] passlib[bcrypt]
-   - Create login endpoint
-   - Verify JWT tokens in dependency
-
-3. OAuth2:
-   - Install: pip install python-multipart
-   - Use FastAPI's OAuth2PasswordBearer
-   - Implement token verification
-
-Example Firebase Auth implementation:
-```python
-import firebase_admin
-from firebase_admin import auth, credentials
-
-# Initialize Firebase
-cred = credentials.Certificate("path/to/service-account.json")
-firebase_admin.initialize_app(cred)
-
-async def get_current_user(authorization: str = Header(None)):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Missing or invalid authorization header")
-    
-    token = authorization.split(" ")[1]
-    try:
-        decoded_token = auth.verify_id_token(token)
-        return {
-            "user_id": decoded_token["uid"],
-            "email": decoded_token["email"],
-            "role": decoded_token.get("role", "customer")
-        }
-    except Exception as e:
-        raise HTTPException(401, "Invalid token")
-```
-
-==================== NEXT.JS INTEGRATION ====================
-
-In your Next.js app, you can call these APIs using:
-
-```javascript
-// api/client.js
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-
-export const apiClient = {
-  // Products
-  getProducts: (params) => 
-    fetch(`${API_BASE_URL}/products?${new URLSearchParams(params)}`),
-  
-  getProduct: (productId) => 
-    fetch(`${API_BASE_URL}/products/${productId}`),
-  
-  // Cart
-  addToCart: (userId, item) =>
-    fetch(`${API_BASE_URL}/users/${userId}/cart/items`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(item)
-    }),
-  
-  // Orders
-  createOrder: (orderData) =>
-    fetch(`${API_BASE_URL}/orders`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(orderData)
-    }),
-  
-  getUserOrders: (userId) =>
-    fetch(`${API_BASE_URL}/users/${userId}/orders`)
-};
-```
-"""
-    

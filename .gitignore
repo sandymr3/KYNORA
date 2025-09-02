@@ -123,6 +123,21 @@ database_test_results_*.json
 final_verification_results_*.json
 optimization_test_results*.json
 
+# Validation and monitoring results
+*_validation_results_*.json
+*_monitoring_results_*.json
+security_monitoring_validation_results_*.json
+performance_benchmarking_results_*.json
+swagger_ui_verification_results_*.json
+openapi_optimization_results_*.json
+
+# Clean and optimization results
+*_clean_results_*.json
+*_optimization_results_*.json
+*_validation_*.json
+*_benchmarking_*.json
+*_verification_*.json
+
 # Summary and documentation files (generated during testing)
 authentication_fixes_summary.md
 database_operations_fix_summary.md
@@ -134,6 +149,28 @@ firestore_index_optimization_summary.md
 firestore_index_docs.md
 firestore_index_documentation.md
 
+# Authentication optimization documentation (generated)
+optimized_authentication_documentation.md
+authentication_usage_examples.py
+endpoint_audit_report.md
+*_completion_summary.md
+direct_auth_test_results_*.json
+comprehensive_auth_test_results_*.json
+
+# Frontend development context files (generated)
+frontend_development_context_files.md
+frontend_quick_reference.md
+
+# Test execution and validation files
+run_*_tests.py
+run_*_validation.py
+verify_*.py
+test_*_comprehensive.py
+test_*_validation.py
+test_*_verification.py
+test_*_benchmarking.py
+test_*_monitoring.py
+
 # Deployment and completion files
 deployment_checklist_and_setup_guide.md
 task_10_completion_summary.md
@@ -143,6 +180,19 @@ task_10_completion_summary.md
 *_optimized.py
 api_usage_examples.py
 openapi_enhancements.py
+
+# Generated JSON files (all types)
+*_results_*.json
+*_data_*.json
+*_config_*.json
+*_cache_*.json
+*_temp_*.json
+*_output_*.json
+*_report_*.json
+*_summary_*.json
+*_metrics_*.json
+*_stats_*.json
+*_analysis_*.json
 
 # Backup and temporary files
 *.bak
