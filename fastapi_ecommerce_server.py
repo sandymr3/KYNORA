@@ -154,13 +154,27 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# CORS middleware for Next.js frontend
+# CORS middleware for frontend applications with authentication support
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "https://kynora.onrender.com", "https://kynora.onrender.com/docs"],  # Add your frontend URLs
+    allow_origins=[
+        "http://localhost:3000",  # Next.js development
+        "http://localhost:3001",  # React development
+        "http://localhost:5173",  # Vite development
+        "https://kynora.onrender.com", 
+        "https://kynora.onrender.com/docs"
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "*",
+        "Authorization",
+        "Content-Type",
+        "Accept",
+        "Origin",
+        "X-Requested-With"
+    ],
+    expose_headers=["X-Request-ID", "X-Process-Time"]
 )
 
 # ==================== ENHANCED REQUEST/RESPONSE LOGGING MIDDLEWARE ====================
@@ -696,20 +710,18 @@ def get_db() -> FirestoreEcommerceDB:
 
 async def get_current_user(request: Request):
     """
-    Optimized Firebase Authentication dependency for centralized authentication.
+    Firebase Authentication dependency for centralized authentication.
     
     This function provides:
-    - Centralized authentication through dependency injection
-    - Clean Swagger UI without individual authorization parameters
-    - Consistent token validation across all protected endpoints
+    - Firebase ID token verification using firebase-admin SDK
+    - Automatic user profile creation for new users
+    - Role-based access control with custom claims support
     - Proper error handling with meaningful messages
     
     Usage:
     - Protected endpoints use: Depends(get_current_user)
-    - Users authenticate once via global "Authorize" button in Swagger UI
-    - Token is automatically applied to all protected endpoints
-    
-    Requirements satisfied: 2.1, 2.2, 2.3, 3.1, 3.2, 3.3
+    - Frontend sends: Authorization: Bearer <firebase_id_token>
+    - Token is verified against Firebase Auth service
     """
     authorization = request.headers.get("authorization")
     if not authorization:
@@ -718,9 +730,9 @@ async def get_current_user(request: Request):
             severity="INFO"
         )
         raise AuthenticationError(
-            "Authorization header missing",
+            "Authorization header missing. Please include 'Authorization: Bearer <firebase_token>' header.",
             error_code="MISSING_AUTH_HEADER",
-            context={"expected_format": "Bearer <token>"}
+            context={"expected_format": "Bearer <firebase_id_token>"}
         )
     
     if not authorization.startswith("Bearer "):
@@ -730,120 +742,191 @@ async def get_current_user(request: Request):
             severity="WARNING"
         )
         raise AuthenticationError(
-            "Invalid authorization header format. Expected 'Bearer <token>'",
+            "Invalid authorization header format. Expected 'Bearer <firebase_id_token>'",
             error_code="INVALID_AUTH_FORMAT",
-            context={"expected_format": "Bearer <token>"}
+            context={"expected_format": "Bearer <firebase_id_token>"}
         )
     
-    token = authorization.split(" ")[1]
+    token = authorization.split(" ", 1)[1]  # Use split with maxsplit=1 to handle tokens with spaces
+    
+    if not token or len(token) < 10:
+        raise AuthenticationError(
+            "Invalid token format. Token appears to be empty or too short.",
+            error_code="INVALID_TOKEN_FORMAT"
+        )
     
     try:
-        # Verify the Firebase ID token
-        decoded_token = auth.verify_id_token(token)
+        # Verify the Firebase ID token with enhanced validation
+        decoded_token = auth.verify_id_token(token, check_revoked=True)
         uid = decoded_token['uid']
+        email = decoded_token.get('email', '')
+        
+        # Log successful token verification
+        auth_logger.debug(f"Firebase token verified successfully for UID: {uid}")
         
         # Get user data from Firestore by UID
         user_doc = firestore_client.collection('users').document(uid).get()
         
         if not user_doc.exists:
-            # Check if user exists by email first
-            email = decoded_token.get('email', '')
-            existing_user_query = firestore_client.collection('users').where('email', '==', email).limit(1).get()
-            
-            if existing_user_query:
-                # User exists with this email, update their UID
-                existing_user_doc = existing_user_query[0]
-                user_data = existing_user_doc.to_dict()
+            # Check if user exists by email first (for migration scenarios)
+            if email:
+                existing_user_query = firestore_client.collection('users').where('email', '==', email).limit(1).get()
                 
-                # Update the existing user document with the new UID
-                firestore_client.collection('users').document(uid).set(user_data)
-                # Delete the old document if it has a different ID
-                if existing_user_doc.id != uid:
-                    firestore_client.collection('users').document(existing_user_doc.id).delete()
-                
-                logger.info(f"Linked existing user {email} to UID: {uid}")
+                if existing_user_query:
+                    # User exists with this email, migrate to new UID
+                    existing_user_doc = existing_user_query[0]
+                    user_data = existing_user_doc.to_dict()
+                    
+                    # Update the existing user document with the new UID
+                    user_data['uid'] = uid
+                    user_data['updatedAt'] = datetime.now()
+                    user_data['lastLoginAt'] = datetime.now()
+                    
+                    firestore_client.collection('users').document(uid).set(user_data)
+                    
+                    # Delete the old document if it has a different ID
+                    if existing_user_doc.id != uid:
+                        firestore_client.collection('users').document(existing_user_doc.id).delete()
+                    
+                    logger.info(f"Migrated existing user {email} to UID: {uid}")
+                else:
+                    # Create new user with default customer role
+                    user_data = {
+                        'uid': uid,
+                        'email': email,
+                        'displayName': decoded_token.get('name', decoded_token.get('firebase', {}).get('identities', {}).get('email', [''])[0].split('@')[0]),
+                        'photoURL': decoded_token.get('picture', ''),
+                        'role': decoded_token.get('role', 'customer'),  # Support custom claims for role
+                        'phone': decoded_token.get('phone_number', ''),
+                        'address': {},
+                        'preferences': {
+                            'currency': 'USD',
+                            'language': 'en',
+                            'notifications': {
+                                'email': True,
+                                'sms': False,
+                                'push': True
+                            }
+                        },
+                        'createdAt': datetime.now(),
+                        'updatedAt': datetime.now(),
+                        'isActive': True,
+                        'lastLoginAt': datetime.now(),
+                        'emailVerified': decoded_token.get('email_verified', False)
+                    }
+                    
+                    # Create user document in Firestore
+                    firestore_client.collection('users').document(uid).set(user_data)
+                    logger.info(f"Created new user profile for UID: {uid}, Email: {email}")
             else:
-                # Create new user with default customer role
-                user_data = {
-                    'uid': uid,
-                    'email': email,
-                    'displayName': decoded_token.get('name', ''),
-                    'photoURL': decoded_token.get('picture', ''),
-                    'role': 'customer',  # Default role for new users
-                    'phone': decoded_token.get('phone_number', ''),
-                    'address': {},
-                    'preferences': {
-                        'currency': 'INR',
-                        'language': 'en',
-                        'notifications': {
-                            'email': True,
-                            'sms': True,
-                            'push': True
-                        }
-                    },
-                    'createdAt': datetime.now(),
-                    'updatedAt': datetime.now(),
-                    'isActive': True,
-                    'lastLoginAt': datetime.now()
-                }
-                
-                # Create user document in Firestore
-                firestore_client.collection('users').document(uid).set(user_data)
-                logger.info(f"Created new user profile for UID: {uid}")
+                raise AuthenticationError(
+                    "User profile not found and email not available for auto-creation",
+                    error_code="USER_PROFILE_REQUIRED"
+                )
         else:
             user_data = user_doc.to_dict()
+            
+            # Update last login time asynchronously (don't wait for it)
+            try:
+                firestore_client.collection('users').document(uid).update({
+                    'lastLoginAt': datetime.now()
+                })
+            except Exception as update_error:
+                # Log but don't fail authentication for login time update errors
+                logger.warning(f"Failed to update last login time for {uid}: {update_error}")
         
-        # Update last login time
-        firestore_client.collection('users').document(uid).update({
-            'lastLoginAt': datetime.now()
-        })
-        
-        # Check if user is active
+        # Check if user account is active
         if not user_data.get('isActive', True):
-            raise HTTPException(
-                status_code=403, 
-                detail="User account is deactivated"
+            log_security_event(
+                event_type="deactivated_user_access_attempt",
+                user_id=uid,
+                details={"email": email},
+                severity="WARNING"
+            )
+            raise AuthenticationError(
+                "User account has been deactivated. Please contact support.",
+                error_code="ACCOUNT_DEACTIVATED",
+                context={"user_id": uid}
             )
         
-        # Return user info in the format expected by the frontend
-        return {
+        # Support custom claims for enhanced role management
+        user_role = user_data.get('role', 'customer')
+        if 'role' in decoded_token:  # Custom claim takes precedence
+            user_role = decoded_token['role']
+            # Update user role in Firestore if it changed
+            if user_data.get('role') != user_role:
+                firestore_client.collection('users').document(uid).update({'role': user_role})
+        
+        # Return user info in the format expected by the application
+        user_info = {
             "id": uid,
-            "email": user_data.get('email', ''),
+            "email": user_data.get('email', email),
             "name": user_data.get('displayName', ''),
-            "role": user_data.get('role', 'customer')
+            "role": user_role,
+            "email_verified": user_data.get('emailVerified', False),
+            "phone": user_data.get('phone', ''),
+            "photo_url": user_data.get('photoURL', '')
         }
         
-    except auth.InvalidIdTokenError:
+        # Log successful authentication
+        auth_logger.info(f"User authenticated successfully: {uid} ({email}) with role: {user_role}")
+        
+        return user_info
+        
+    except auth.InvalidIdTokenError as e:
         log_security_event(
-            event_type="invalid_token_attempt",
-            details={"token_prefix": token[:10] + "..." if len(token) > 10 else token},
+            event_type="invalid_firebase_token",
+            details={"token_prefix": token[:10] + "..." if len(token) > 10 else token, "error": str(e)},
             severity="WARNING"
         )
         raise AuthenticationError(
-            "Invalid Firebase ID token",
-            error_code="INVALID_TOKEN",
+            "Invalid Firebase ID token. Please log in again.",
+            error_code="INVALID_FIREBASE_TOKEN",
             context={"token_type": "firebase_id_token"}
         )
-    except auth.ExpiredIdTokenError:
+    except auth.ExpiredIdTokenError as e:
         log_security_event(
-            event_type="expired_token_attempt",
+            event_type="expired_firebase_token",
             details={"token_prefix": token[:10] + "..." if len(token) > 10 else token},
             severity="INFO"
         )
         raise AuthenticationError(
-            "Firebase ID token has expired",
-            error_code="EXPIRED_TOKEN",
+            "Firebase ID token has expired. Please log in again.",
+            error_code="EXPIRED_FIREBASE_TOKEN",
             context={"token_type": "firebase_id_token"}
         )
+    except auth.RevokedIdTokenError as e:
+        log_security_event(
+            event_type="revoked_firebase_token",
+            details={"token_prefix": token[:10] + "..." if len(token) > 10 else token},
+            severity="WARNING"
+        )
+        raise AuthenticationError(
+            "Firebase ID token has been revoked. Please log in again.",
+            error_code="REVOKED_FIREBASE_TOKEN",
+            context={"token_type": "firebase_id_token"}
+        )
+    except auth.CertificateFetchError as e:
+        auth_logger.error(f"Firebase certificate fetch error: {str(e)}")
+        log_security_event(
+            event_type="firebase_certificate_error",
+            details={"error": str(e)},
+            severity="ERROR"
+        )
+        raise AuthenticationError(
+            "Authentication service temporarily unavailable. Please try again.",
+            error_code="AUTH_SERVICE_ERROR",
+            context={"service": "firebase_auth"}
+        )
     except Exception as e:
-        auth_logger.error(f"Unexpected error in authentication: {str(e)}", exc_info=True)
+        auth_logger.error(f"Unexpected error in Firebase authentication: {str(e)}", exc_info=True)
         log_security_event(
             event_type="authentication_system_error",
             details={"error": str(e), "error_type": type(e).__name__},
             severity="ERROR"
         )
         raise AuthenticationError(
-            "Authentication system temporarily unavailable",
+            "Authentication system temporarily unavailable. Please try again later.",
             error_code="AUTH_SYSTEM_ERROR",
             context={"original_error": str(e)}
         )
@@ -913,6 +996,17 @@ async def require_manager_or_admin(current_user = Depends(get_current_user)):
 async def require_authenticated_user(current_user = Depends(get_current_user)):
     """Dependency to require any authenticated user"""
     return current_user
+
+# Optional authentication dependency for endpoints that work with or without auth
+async def get_optional_user(request: Request) -> Optional[Dict[str, Any]]:
+    """Optional authentication - returns user if authenticated, None if not"""
+    try:
+        return await get_current_user(request)
+    except AuthenticationError:
+        return None
+    except Exception as e:
+        logger.warning(f"Error in optional authentication: {str(e)}")
+        return None
 
 # ==================== STANDARDIZED RESPONSE MODELS ====================
 
@@ -1508,27 +1602,163 @@ class NotificationCreate(BaseModel):
 
 # ==================== AUTHENTICATION ENDPOINTS ====================
 
+@app.get("/auth/status", response_model=Dict[str, Any], summary="Check authentication status")
+async def check_auth_status(
+    request: Request
+):
+    """Check if user is authenticated without requiring authentication (optional auth)"""
+    try:
+        authorization = request.headers.get("authorization")
+        if not authorization or not authorization.startswith("Bearer "):
+            return create_success_response(
+                data={
+                    "authenticated": False,
+                    "user": None,
+                    "requires_login": True
+                },
+                message="No authentication provided"
+            )
+        
+        # Try to get current user without raising exceptions
+        try:
+            current_user = await get_current_user(request)
+            return create_success_response(
+                data={
+                    "authenticated": True,
+                    "user": current_user,
+                    "requires_login": False
+                },
+                message="User is authenticated"
+            )
+        except AuthenticationError:
+            return create_success_response(
+                data={
+                    "authenticated": False,
+                    "user": None,
+                    "requires_login": True,
+                    "token_invalid": True
+                },
+                message="Authentication token is invalid or expired"
+            )
+            
+    except Exception as e:
+        logger.error(f"Error checking auth status: {str(e)}")
+        return create_success_response(
+            data={
+                "authenticated": False,
+                "user": None,
+                "requires_login": True,
+                "error": "Unable to verify authentication status"
+            },
+            message="Authentication status check failed"
+        )
+
 @app.get("/auth/me", response_model=Dict[str, Any], summary="Get current user profile")
 async def get_current_user_profile(
     current_user = Depends(get_current_user)
 ):
-    """Get the current authenticated user's profile"""
-    return current_user
+    """Get the current authenticated user's profile with full details"""
+    try:
+        return create_success_response(
+            data={
+                "user": current_user,
+                "authenticated": True,
+                "session_valid": True
+            },
+            message="User profile retrieved successfully"
+        )
+    except Exception as e:
+        logger.error(f"Error getting current user profile: {str(e)}")
+        raise APIError(500, "Failed to retrieve user profile", "INTERNAL_ERROR")
 
 @app.post("/auth/test", response_model=Dict[str, Any], summary="Test authentication")
 async def test_authentication(
     current_user = Depends(get_current_user)
 ):
-    """Test endpoint to verify authentication is working"""
-    return {
-        "success": True,
-        "message": "Authentication successful",
-        "user": {
-            "id": current_user["id"],
-            "email": current_user["email"],
-            "role": current_user["role"]
+    """Test endpoint to verify Firebase authentication is working properly"""
+    try:
+        return create_success_response(
+            data={
+                "authenticated": True,
+                "user_id": current_user["id"],
+                "email": current_user["email"],
+                "role": current_user["role"],
+                "email_verified": current_user.get("email_verified", False),
+                "auth_method": "firebase_id_token"
+            },
+            message="Firebase authentication successful"
+        )
+    except Exception as e:
+        logger.error(f"Error in authentication test: {str(e)}")
+        raise APIError(500, "Authentication test failed", "INTERNAL_ERROR")
+
+@app.get("/users/profile", response_model=Dict[str, Any], summary="Get detailed user profile")
+async def get_detailed_user_profile(
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Get detailed user profile with preferences and settings"""
+    try:
+        result = db.get_user_profile(current_user['id'])
+        if not result['success']:
+            raise APIError(400, result['error'], "DATABASE_ERROR")
+        
+        user_data = result.get('data', {})
+        
+        # Merge Firebase auth data with Firestore profile data
+        detailed_profile = {
+            **current_user,
+            **user_data,
+            "last_updated": user_data.get('updatedAt', ''),
+            "member_since": user_data.get('createdAt', ''),
+            "profile_complete": bool(
+                user_data.get('displayName') and 
+                user_data.get('phone') and 
+                user_data.get('address', {}).get('street')
+            )
         }
-    }
+        
+        return create_success_response(
+            data=detailed_profile,
+            message="Detailed user profile retrieved successfully"
+        )
+        
+    except APIError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error getting detailed user profile: {str(e)}")
+        raise APIError(500, "Failed to retrieve detailed user profile", "INTERNAL_ERROR")
+
+@app.post("/users/profile", response_model=Dict[str, Any], summary="Update user profile")
+async def update_user_profile(
+    profile_data: UserUpdate,
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Update current user's profile information"""
+    try:
+        # Users can only update their own profile
+        update_data = profile_data.dict(exclude_unset=True)
+        update_data['updatedAt'] = datetime.now()
+        
+        result = db.update_user_profile(current_user['id'], update_data)
+        if not result['success']:
+            raise APIError(400, result['error'], "DATABASE_ERROR")
+        
+        return create_success_response(
+            data={
+                "user_id": current_user['id'],
+                "updated_fields": list(update_data.keys()),
+                "updated_at": update_data['updatedAt'].isoformat()
+            },
+            message="User profile updated successfully"
+        )
+        
+    except APIError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating user profile: {str(e)}")
+        raise APIError(500, "Failed to update user profile", "INTERNAL_ERROR")
 
 # ==================== USER ENDPOINTS ====================
 
