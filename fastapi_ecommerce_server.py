@@ -2793,6 +2793,61 @@ async def get_low_stock_alerts(
         raise HTTPException(status_code=400, detail=result['error'])
     return result
 
+# ==================== USER LOOKUP ENDPOINTS ====================
+
+class UserLookupRequest(BaseModel):
+    email: str = Field(..., pattern=r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', description="User email address")
+
+@app.post("/users/lookup", response_model=Dict[str, Any], summary="Get user profile ID by email")
+async def get_user_profile_by_email(
+    lookup_request: UserLookupRequest,
+    current_user = Depends(get_current_user)
+):
+    """Get user profile ID from Firestore by email address"""
+    try:
+        email = lookup_request.email.lower().strip()
+        
+        # Query Firestore for user by email
+        users_query = firestore_client.collection('users').where('email', '==', email).limit(1).get()
+        
+        if not users_query:
+            raise NotFoundError(
+                f"No user found with email: {email}",
+                resource_type="user",
+                context={"email": email}
+            )
+        
+        user_doc = users_query[0]
+        user_data = user_doc.to_dict()
+        
+        # Log admin lookup action
+        log_user_action(
+            user_id=current_user['id'],
+            action="user_lookup_by_email",
+            resource_type="user",
+            resource_id=user_doc.id,
+            details={"lookup_email": email}
+        )
+        
+        return create_success_response(
+            data={
+                "user_id": user_doc.id,
+                "email": user_data.get('email'),
+                "name": user_data.get('displayName', ''),
+                "role": user_data.get('role', 'customer'),
+                "is_active": user_data.get('isActive', True),
+                "created_at": user_data.get('createdAt', ''),
+                "last_login_at": user_data.get('lastLoginAt', '')
+            },
+            message=f"User profile found for email: {email}"
+        )
+        
+    except NotFoundError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error looking up user by email {lookup_request.email}: {str(e)}")
+        raise APIError(500, "Failed to lookup user by email", "INTERNAL_ERROR")
+
 # ==================== UTILITY ENDPOINTS ====================
 
 @app.get("/favicon.ico")
