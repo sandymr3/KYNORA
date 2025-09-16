@@ -3257,6 +3257,821 @@ async def rate_limit_exception_handler(request, exc: RateLimitError):
         headers=headers
     )
 
+# ==================== CATEGORY ENDPOINTS ====================
+
+@app.get("/categories", response_model=Dict[str, Any], summary="Get categories")
+@cached_response(ttl_seconds=600, cache_key_params=['parent_id'])
+async def list_categories(
+    parent_id: Optional[str] = Query(None, description="Parent category ID to list children for"),
+    db: FirestoreEcommerceDB = Depends(get_db)
+):
+    """Get root categories or children of a category."""
+    result = db.list_categories(parent_id)
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+@app.post("/categories", response_model=Dict[str, Any], summary="Create category")
+async def create_category(
+    category: CategoryCreate,
+    db: FirestoreEcommerceDB = Depends(get_db),
+    admin = Depends(require_admin)
+):
+    result = db.add_category(category.dict())
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    invalidate_cache_pattern("list_categories")
+    return result
+
+@app.put("/categories/{category_id}", response_model=Dict[str, Any], summary="Update category")
+async def update_category_endpoint(
+    category_id: str = Path(..., description="Category ID"),
+    update: CategoryUpdate = Body(...),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    admin = Depends(require_admin)
+):
+    result = db.update_category(category_id, update.dict(exclude_unset=True))
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    invalidate_cache_pattern("list_categories")
+    return result
+
+@app.patch("/categories/{category_id}/archive", response_model=Dict[str, Any], summary="Archive category")
+async def archive_category_endpoint(
+    category_id: str = Path(..., description="Category ID"),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    admin = Depends(require_admin)
+):
+    result = db.archive_category(category_id)
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    invalidate_cache_pattern("list_categories")
+    return result
+
+# ==================== CART ENDPOINTS ====================
+
+@app.get("/cart", response_model=Dict[str, Any], summary="Get my cart")
+async def get_my_cart(
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(require_authenticated_user)
+):
+    result = db.get_user_cart(current_user['id'])
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+@app.post("/cart/items", response_model=Dict[str, Any], summary="Add item to cart")
+async def add_cart_item(
+    item: CartItemAdd,
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(require_authenticated_user)
+):
+    result = db.add_item_to_cart(current_user['id'], item.dict())
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+@app.patch("/cart/items/{product_id}", response_model=Dict[str, Any], summary="Update cart item")
+async def update_cart_item_endpoint(
+    product_id: str = Path(..., description="Product ID"),
+    update: CartItemUpdate = Body(...),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(require_authenticated_user)
+):
+    result = db.update_cart_item(current_user['id'], product_id, update.dict(exclude_unset=True))
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+@app.delete("/cart/items/{product_id}", response_model=Dict[str, Any], summary="Remove cart item")
+async def remove_cart_item_endpoint(
+    product_id: str = Path(..., description="Product ID"),
+    variant_id: Optional[str] = Query(None, description="Variant ID"),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(require_authenticated_user)
+):
+    result = db.remove_item_from_cart(current_user['id'], product_id, variant_id)
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+@app.post("/cart/clear", response_model=Dict[str, Any], summary="Clear cart")
+async def clear_cart_endpoint(
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(require_authenticated_user)
+):
+    result = db.clear_cart(current_user['id'])
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+# ==================== REVIEW ENDPOINTS ====================
+
+@app.get("/products/{product_id}/reviews", response_model=Dict[str, Any], summary="Get product reviews")
+@cached_response(ttl_seconds=300, cache_key_params=['product_id', 'limit'])
+async def get_product_reviews_endpoint(
+    product_id: str = Path(..., description="Product ID"),
+    limit: int = Query(20, ge=1, le=100),
+    db: FirestoreEcommerceDB = Depends(get_db)
+):
+    result = db.get_product_reviews(product_id, status='approved', limit=limit)
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+@app.post("/reviews", response_model=Dict[str, Any], summary="Submit review")
+async def submit_review_endpoint(
+    review: ReviewCreate,
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(require_authenticated_user)
+):
+    if review.user_id != current_user['id'] and current_user.get('role') != 'admin':
+        raise AuthorizationError("You can only submit reviews as yourself")
+    result = db.submit_review(review.dict())
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    invalidate_cache_pattern("get_product_reviews_endpoint")
+    return result
+
+@app.get("/users/{user_id}/reviews", response_model=Dict[str, Any], summary="Get my reviews")
+async def get_user_reviews_endpoint(
+    user_id: str = Path(..., description="User ID"),
+    limit: int = Query(20, ge=1, le=100),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(require_authenticated_user)
+):
+    validate_user_access(current_user, user_id)
+    result = db.get_user_reviews(user_id, limit=limit)
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+@app.put("/reviews/{review_id}", response_model=Dict[str, Any], summary="Update review")
+async def update_review_endpoint(
+    review_id: str = Path(..., description="Review ID"),
+    update: ReviewUpdate = Body(...),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(require_authenticated_user)
+):
+    result = db.update_review(review_id, update.dict(exclude_unset=True), current_user['id'])
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+@app.post("/reviews/{review_id}/moderate", response_model=Dict[str, Any], summary="Moderate review")
+async def moderate_review_endpoint(
+    review_id: str = Path(..., description="Review ID"),
+    data: ReviewModerate = Body(...),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    admin = Depends(require_manager_or_admin)
+):
+    result = db.moderate_review(review_id, data.action, admin['id'], data.notes)
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+# ==================== NOTIFICATIONS ENDPOINTS ====================
+
+@app.get("/notifications", response_model=Dict[str, Any], summary="Get my notifications")
+async def get_notifications(
+    unread_only: bool = Query(False),
+    limit: int = Query(20, ge=1, le=100),
+    last_doc_id: Optional[str] = Query(None),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(require_authenticated_user)
+):
+    result = db.get_user_notifications(current_user['id'], unread_only, limit, last_doc_id)
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+@app.post("/notifications", response_model=Dict[str, Any], summary="Create notification")
+async def create_notification_endpoint(
+    notification: NotificationCreate,
+    db: FirestoreEcommerceDB = Depends(get_db),
+    admin = Depends(require_admin)
+):
+    result = db.create_notification(notification.dict())
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+@app.patch("/notifications/{notification_id}/read", response_model=Dict[str, Any], summary="Mark notification read")
+async def mark_notification_read_endpoint(
+    notification_id: str = Path(..., description="Notification ID"),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(require_authenticated_user)
+):
+    result = db.mark_notification_read(notification_id, current_user['id'])
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+# ==================== INVENTORY AND WAREHOUSES ENDPOINTS ====================
+
+@app.post("/inventory", response_model=Dict[str, Any], summary="Add inventory record")
+async def add_inventory_record_endpoint(
+    payload: Dict[str, Any] = Body(...),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(require_seller_or_admin)
+):
+    result = db.add_inventory_record(payload)
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+@app.patch("/inventory/adjust", response_model=Dict[str, Any], summary="Adjust inventory quantities")
+async def adjust_inventory_endpoint(
+    product_id: str = Body(...),
+    warehouse_id: str = Body(...),
+    quantity_change: int = Body(...),
+    movement_type: str = Body(...),
+    notes: Optional[str] = Body(None),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(require_seller_or_admin)
+):
+    result = db.update_inventory_quantities(product_id, warehouse_id, quantity_change, movement_type, notes)
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+@app.get("/inventory/products/{product_id}", response_model=Dict[str, Any], summary="Get product inventory")
+async def get_product_inventory_endpoint(
+    product_id: str = Path(..., description="Product ID"),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(require_seller_or_admin)
+):
+    result = db.get_product_inventory(product_id)
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+@app.get("/inventory/low-stock", response_model=Dict[str, Any], summary="Get low stock items")
+async def get_low_stock_items_endpoint(
+    limit: int = Query(50, ge=1, le=100),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    admin = Depends(require_manager_or_admin)
+):
+    result = db.get_low_stock_items(limit)
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+@app.get("/warehouses", response_model=Dict[str, Any], summary="List warehouses")
+async def list_warehouses_endpoint(
+    active_only: bool = Query(True),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(require_seller_or_admin)
+):
+    result = db.list_warehouses(active_only)
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+@app.post("/warehouses", response_model=Dict[str, Any], summary="Create warehouse")
+async def create_warehouse_endpoint(
+    payload: Dict[str, Any] = Body(...),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    admin = Depends(require_admin)
+):
+    result = db.create_warehouse(payload)
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+@app.get("/warehouses/{warehouse_id}", response_model=Dict[str, Any], summary="Get warehouse details")
+async def get_warehouse_details_endpoint(
+    warehouse_id: str = Path(...),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(require_seller_or_admin)
+):
+    result = db.get_warehouse_details(warehouse_id)
+    if not result['success']:
+        raise APIError(404, result['error'], "DATABASE_ERROR")
+    return result
+
+@app.put("/warehouses/{warehouse_id}", response_model=Dict[str, Any], summary="Update warehouse")
+async def update_warehouse_endpoint(
+    warehouse_id: str = Path(...),
+    update: Dict[str, Any] = Body(...),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    admin = Depends(require_admin)
+):
+    result = db.update_warehouse_details(warehouse_id, update)
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+# ==================== SUPPLIERS ENDPOINTS ====================
+
+@app.post("/suppliers", response_model=Dict[str, Any], summary="Add supplier")
+async def add_supplier_endpoint(
+    payload: Dict[str, Any] = Body(...),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    admin = Depends(require_admin)
+):
+    result = db.add_supplier(payload)
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+@app.get("/suppliers", response_model=Dict[str, Any], summary="List suppliers")
+async def list_suppliers_endpoint(
+    active_only: bool = Query(True),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    admin = Depends(require_admin)
+):
+    result = db.list_suppliers(active_only)
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+@app.get("/suppliers/{supplier_id}", response_model=Dict[str, Any], summary="Get supplier")
+async def get_supplier_endpoint(
+    supplier_id: str = Path(...),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    admin = Depends(require_admin)
+):
+    result = db.get_supplier_by_id(supplier_id)
+    if not result['success']:
+        raise APIError(404, result['error'], "DATABASE_ERROR")
+    return result
+
+@app.put("/suppliers/{supplier_id}", response_model=Dict[str, Any], summary="Update supplier")
+async def update_supplier_endpoint(
+    supplier_id: str = Path(...),
+    update: Dict[str, Any] = Body(...),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    admin = Depends(require_admin)
+):
+    result = db.update_supplier_info(supplier_id, update)
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+# ==================== DASHBOARD/ANALYTICS ENDPOINTS ====================
+
+@app.get("/dashboard/stats", response_model=Dict[str, Any], summary="Get dashboard stats")
+async def get_dashboard_stats_endpoint(
+    seller_id: Optional[str] = Query(None),
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(require_authenticated_user)
+):
+    # Restrict seller_id to self unless admin
+    if seller_id and current_user.get('role') != 'admin' and seller_id != current_user['id']:
+        raise AuthorizationError("You can only view your own stats")
+    result = db.get_dashboard_stats(seller_id)
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+class SalesStatsRequest(BaseModel):
+    seller_id: str
+    start_date: datetime
+    end_date: datetime
+
+@app.post("/dashboard/sales", response_model=Dict[str, Any], summary="Get sales stats")
+async def get_sales_stats_endpoint(
+    payload: SalesStatsRequest,
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(require_seller_or_admin)
+):
+    # Non-admins can only request their own seller_id
+    if current_user.get('role') != 'admin' and payload.seller_id != current_user['id']:
+        raise AuthorizationError("You can only view your own sales stats")
+    result = db.get_sales_stats(payload.seller_id, payload.start_date, payload.end_date)
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+# ==================== HEALTH ENDPOINT ====================
+
+@app.get("/health", response_model=Dict[str, Any], summary="Health check")
+async def health_endpoint(db: FirestoreEcommerceDB = Depends(get_db)):
+    result = db.health_check()
+    if not result['success']:
+        raise APIError(503, "Unhealthy", "SERVICE_UNAVAILABLE")
+    return result
+
+# ==================== WISHLIST ENDPOINTS ====================
+
+class WishlistItem(BaseModel):
+    product_id: str = Field(..., min_length=1)
+
+@app.get("/users/me/wishlist", response_model=Dict[str, Any], summary="Get my wishlist")
+async def get_my_wishlist(
+    current_user = Depends(require_authenticated_user)
+):
+    doc = firestore_client.collection('wishlists').document(current_user['id']).get()
+    data = doc.to_dict() if doc.exists else {"items": []}
+    return create_success_response(data=data)
+
+@app.post("/users/me/wishlist", response_model=Dict[str, Any], summary="Add to wishlist")
+async def add_to_wishlist(
+    item: WishlistItem,
+    current_user = Depends(require_authenticated_user)
+):
+    ref = firestore_client.collection('wishlists').document(current_user['id'])
+    doc = ref.get()
+    items = (doc.to_dict() or {}).get('items', []) if doc.exists else []
+    if item.product_id not in items:
+        items.append(item.product_id)
+    ref.set({"user_id": current_user['id'], "items": items, "updatedAt": datetime.now()}, merge=True)
+    return create_success_response(message="Added to wishlist")
+
+@app.delete("/users/me/wishlist/{product_id}", response_model=Dict[str, Any], summary="Remove from wishlist")
+async def remove_from_wishlist(
+    product_id: str = Path(...),
+    current_user = Depends(require_authenticated_user)
+):
+    ref = firestore_client.collection('wishlists').document(current_user['id'])
+    doc = ref.get()
+    if not doc.exists:
+        return create_success_response(message="Wishlist updated")
+    items = (doc.to_dict() or {}).get('items', [])
+    items = [pid for pid in items if pid != product_id]
+    ref.set({"items": items, "updatedAt": datetime.now()}, merge=True)
+    return create_success_response(message="Removed from wishlist")
+
+# ==================== ADDRESS BOOK ENDPOINTS ====================
+
+class AddressCreate(BaseModel):
+    name: Optional[str]
+    street: str
+    city: str
+    state: Optional[str]
+    zip: str
+    country: str
+    phone: Optional[str]
+    is_default: bool = False
+
+class AddressUpdate(BaseModel):
+    name: Optional[str]
+    street: Optional[str]
+    city: Optional[str]
+    state: Optional[str]
+    zip: Optional[str]
+    country: Optional[str]
+    phone: Optional[str]
+    is_default: Optional[bool]
+
+@app.get("/users/me/addresses", response_model=Dict[str, Any], summary="List my addresses")
+async def list_my_addresses(current_user = Depends(require_authenticated_user)):
+    col = firestore_client.collection('users').document(current_user['id']).collection('addresses')
+    docs = list(col.stream())
+    addresses = [{"id": d.id, **d.to_dict()} for d in docs]
+    return create_success_response(data=addresses)
+
+@app.post("/users/me/addresses", response_model=Dict[str, Any], summary="Add address")
+async def add_address(address: AddressCreate, current_user = Depends(require_authenticated_user)):
+    col = firestore_client.collection('users').document(current_user['id']).collection('addresses')
+    doc_ref = col.document()
+    doc_ref.set({**address.dict(), "createdAt": datetime.now(), "updatedAt": datetime.now()})
+    return create_success_response(data={"address_id": doc_ref.id}, message="Address added")
+
+@app.put("/users/me/addresses/{address_id}", response_model=Dict[str, Any], summary="Update address")
+async def update_address(address_id: str = Path(...), update: AddressUpdate = Body(...), current_user = Depends(require_authenticated_user)):
+    ref = firestore_client.collection('users').document(current_user['id']).collection('addresses').document(address_id)
+    if not ref.get().exists:
+        raise NotFoundError("Address not found")
+    ref.update({**update.dict(exclude_unset=True), "updatedAt": datetime.now()})
+    return create_success_response(message="Address updated")
+
+@app.delete("/users/me/addresses/{address_id}", response_model=Dict[str, Any], summary="Delete address")
+async def delete_address(address_id: str = Path(...), current_user = Depends(require_authenticated_user)):
+    ref = firestore_client.collection('users').document(current_user['id']).collection('addresses').document(address_id)
+    if ref.get().exists:
+        ref.delete()
+    return create_success_response(message="Address deleted")
+
+# ==================== SUPPORT TICKETS (BASIC) ====================
+
+class SupportTicketCreate(BaseModel):
+    subject: str
+    message: str
+    order_id: Optional[str] = None
+
+class SupportTicketUpdate(BaseModel):
+    status: Optional[str] = Field(None, pattern=r'^(open|in_progress|resolved|closed)$')
+    admin_notes: Optional[str] = None
+
+@app.post("/support/tickets", response_model=Dict[str, Any], summary="Create support ticket")
+async def create_support_ticket(payload: SupportTicketCreate, current_user = Depends(require_authenticated_user)):
+    ref = firestore_client.collection('support_tickets').document()
+    ref.set({
+        **payload.dict(),
+        "ticket_id": ref.id,
+        "user_id": current_user['id'],
+        "status": "open",
+        "createdAt": datetime.now(),
+        "updatedAt": datetime.now()
+    })
+    return create_success_response(data={"ticket_id": ref.id}, message="Ticket created")
+
+@app.get("/support/tickets", response_model=Dict[str, Any], summary="List my tickets")
+async def list_my_tickets(current_user = Depends(require_authenticated_user)):
+    q = firestore_client.collection('support_tickets').where('user_id', '==', current_user['id'])
+    docs = list(q.stream())
+    tickets = [d.to_dict() for d in docs]
+    return create_success_response(data=tickets)
+
+@app.get("/admin/support/tickets", response_model=Dict[str, Any], summary="List all tickets")
+async def list_all_tickets(admin = Depends(require_admin)):
+    docs = list(firestore_client.collection('support_tickets').stream())
+    tickets = [d.to_dict() for d in docs]
+    return create_success_response(data=tickets)
+
+@app.patch("/admin/support/tickets/{ticket_id}", response_model=Dict[str, Any], summary="Update ticket")
+async def update_ticket_admin(ticket_id: str = Path(...), update: SupportTicketUpdate = Body(...), admin = Depends(require_admin)):
+    ref = firestore_client.collection('support_tickets').document(ticket_id)
+    if not ref.get().exists:
+        raise NotFoundError("Ticket not found")
+    ref.update({**update.dict(exclude_unset=True), "updatedAt": datetime.now()})
+    return create_success_response(message="Ticket updated")
+
+# ==================== SHIPPING (BASIC STUBS) ====================
+
+class ShippingRateRequest(BaseModel):
+    destination_country: str
+    weight_kg: float
+    carrier: Optional[str] = None
+
+@app.post("/shipping/rates", response_model=Dict[str, Any], summary="Get shipping rates")
+async def get_shipping_rates(payload: ShippingRateRequest):
+    base = 5.0
+    per_kg = 2.0
+    amount = base + max(0.0, payload.weight_kg) * per_kg
+    return create_success_response(data={"currency": "USD", "amount": round(amount, 2), "carrier": payload.carrier or "generic"})
+
+@app.get("/shipping/track/{tracking_number}", response_model=Dict[str, Any], summary="Track shipment")
+async def track_shipment(tracking_number: str = Path(...)):
+    return create_success_response(data={"tracking_number": tracking_number, "status": "in_transit"})
+
+# ==================== PAYMENTS (BASIC STUBS) ====================
+
+class PaymentIntentRequest(BaseModel):
+    amount: float
+    currency: str = "USD"
+    order_id: Optional[str] = None
+
+@app.post("/payments/intent", response_model=Dict[str, Any], summary="Create payment intent")
+async def create_payment_intent(payload: PaymentIntentRequest, current_user = Depends(require_authenticated_user)):
+    # Stub: integrate with Stripe/Razorpay in production
+    client_secret = f"test_secret_{hashlib.md5(f'{payload.amount}{payload.currency}'.encode()).hexdigest()[:10]}"
+    return create_success_response(data={"client_secret": client_secret, "order_id": payload.order_id})
+
+@app.post("/payments/webhook", summary="Payment webhook receiver")
+async def payments_webhook(event: Dict[str, Any] = Body(...)):
+    api_logger.info(f"Received payment webhook: {event.get('type', 'unknown')}")
+    return JSONResponse(status_code=200, content={"received": True})
+
+# ==================== COLLECTIONS AND PRICE RULES ====================
+
+class CollectionCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    image_url: Optional[str] = None
+    product_ids: List[str] = []
+    is_active: bool = True
+
+class CollectionUpdate(BaseModel):
+    name: Optional[str]
+    description: Optional[str]
+    image_url: Optional[str]
+    product_ids: Optional[List[str]]
+    is_active: Optional[bool]
+
+@app.post("/collections", response_model=Dict[str, Any], summary="Create collection")
+async def create_collection_endpoint(payload: CollectionCreate, admin = Depends(require_admin)):
+    ref = firestore_client.collection('collections').document()
+    data = {**payload.dict(), "collection_id": ref.id, "createdAt": datetime.now(), "updatedAt": datetime.now()}
+    ref.set(data)
+    return create_success_response(data={"collection_id": ref.id}, message="Collection created")
+
+@app.get("/collections", response_model=Dict[str, Any], summary="List collections")
+async def list_collections_endpoint(active_only: bool = Query(True)):
+    q = firestore_client.collection('collections')
+    if active_only:
+        q = q.where('is_active', '==', True)
+    docs = list(q.stream())
+    return create_success_response(data=[d.to_dict() for d in docs])
+
+@app.put("/collections/{collection_id}", response_model=Dict[str, Any], summary="Update collection")
+async def update_collection_endpoint(collection_id: str = Path(...), update: CollectionUpdate = Body(...), admin = Depends(require_admin)):
+    ref = firestore_client.collection('collections').document(collection_id)
+    if not ref.get().exists:
+        raise NotFoundError("Collection not found")
+    ref.update({**update.dict(exclude_unset=True), "updatedAt": datetime.now()})
+    return create_success_response(message="Collection updated")
+
+class PriceRuleCreate(BaseModel):
+    name: str
+    type: str = Field(..., pattern=r'^(percentage|fixed)$')
+    value: float
+    applies_to: str = Field(..., pattern=r'^(product|category|collection|cart)$')
+    target_ids: List[str] = []
+    active: bool = True
+
+class PriceRuleUpdate(BaseModel):
+    name: Optional[str]
+    type: Optional[str]
+    value: Optional[float]
+    applies_to: Optional[str]
+    target_ids: Optional[List[str]]
+    active: Optional[bool]
+
+@app.post("/price-rules", response_model=Dict[str, Any], summary="Create price rule")
+async def create_price_rule(payload: PriceRuleCreate, admin = Depends(require_admin)):
+    ref = firestore_client.collection('price_rules').document()
+    ref.set({**payload.dict(), "rule_id": ref.id, "createdAt": datetime.now(), "updatedAt": datetime.now()})
+    return create_success_response(data={"rule_id": ref.id}, message="Price rule created")
+
+@app.get("/price-rules", response_model=Dict[str, Any], summary="List price rules")
+async def list_price_rules(active_only: bool = Query(True), admin = Depends(require_admin)):
+    q = firestore_client.collection('price_rules')
+    if active_only:
+        q = q.where('active', '==', True)
+    docs = list(q.stream())
+    return create_success_response(data=[d.to_dict() for d in docs])
+
+@app.put("/price-rules/{rule_id}", response_model=Dict[str, Any], summary="Update price rule")
+async def update_price_rule(rule_id: str = Path(...), update: PriceRuleUpdate = Body(...), admin = Depends(require_admin)):
+    ref = firestore_client.collection('price_rules').document(rule_id)
+    if not ref.get().exists:
+        raise NotFoundError("Rule not found")
+    ref.update({**update.dict(exclude_unset=True), "updatedAt": datetime.now()})
+    return create_success_response(message="Price rule updated")
+
+@app.post("/cart/preview-discounts", response_model=Dict[str, Any], summary="Preview cart discounts")
+async def preview_cart_discounts(current_user = Depends(require_authenticated_user)):
+    cart = firestore_client.collection('carts').document(current_user['id']).get().to_dict() or {}
+    rules_docs = list(firestore_client.collection('price_rules').where('active', '==', True).stream())
+    total = cart.get('total_amount', 0.0)
+    discount = 0.0
+    for d in rules_docs:
+        rule = d.to_dict()
+        if rule.get('applies_to') == 'cart':
+            if rule.get('type') == 'percentage':
+                discount += total * float(rule.get('value', 0)) / 100.0
+            elif rule.get('type') == 'fixed':
+                discount += float(rule.get('value', 0))
+    discount = max(0.0, min(discount, total))
+    return create_success_response(data={"cart_total": total, "discount": round(discount, 2), "payable": round(total - discount, 2)})
+
+# ==================== SEO: SLUGS, SITEMAP, FEEDS ====================
+
+class SlugSetRequest(BaseModel):
+    slug: str
+    target_type: str = Field(..., pattern=r'^(product|category|collection)$')
+    target_id: str
+
+@app.post("/seo/slug", response_model=Dict[str, Any], summary="Set slug mapping")
+async def set_slug(payload: SlugSetRequest, admin = Depends(require_admin)):
+    # Ensure slug uniqueness
+    existing = list(firestore_client.collection('slugs').where('slug', '==', payload.slug).limit(1).get())
+    if existing:
+        raise ConflictError("Slug already in use")
+    ref = firestore_client.collection('slugs').document()
+    ref.set({**payload.dict(), "createdAt": datetime.now(), "updatedAt": datetime.now()})
+    return create_success_response(message="Slug set")
+
+@app.get("/seo/slug/{slug}", response_model=Dict[str, Any], summary="Resolve slug")
+async def resolve_slug(slug: str = Path(...)):
+    docs = list(firestore_client.collection('slugs').where('slug', '==', slug).limit(1).get())
+    if not docs:
+        raise NotFoundError("Slug not found")
+    return create_success_response(data=docs[0].to_dict())
+
+from fastapi import Response
+
+@app.get("/sitemap.xml", summary="Sitemap")
+async def sitemap_xml() -> Response:
+    base = "https://kynora.onrender.com"
+    urls = [f"{base}/"]
+    # Add product and category URLs if slugs exist
+    slug_docs = list(firestore_client.collection('slugs').stream())
+    for d in slug_docs:
+        s = d.to_dict()
+        urls.append(f"{base}/{s.get('target_type','item')}/{s.get('slug')}")
+    body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" \
+           "<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">" + \
+           "".join([f"<url><loc>{u}</loc></url>" for u in urls]) + \
+           "</urlset>"
+    return Response(content=body, media_type="application/xml")
+
+@app.get("/feeds/products.json", response_model=Dict[str, Any], summary="Products feed")
+async def products_feed(db: FirestoreEcommerceDB = Depends(get_db)):
+    res = db.get_active_products(limit=100)
+    if not res['success']:
+        raise APIError(400, res['error'], "DATABASE_ERROR")
+    return create_success_response(data=res.get('data', []))
+
+# ==================== CHECKOUT SESSIONS ====================
+
+class CheckoutSessionCreate(BaseModel):
+    address_id: Optional[str] = None
+
+@app.post("/checkout/session", response_model=Dict[str, Any], summary="Create checkout session")
+async def create_checkout_session(payload: CheckoutSessionCreate, db: FirestoreEcommerceDB = Depends(get_db), current_user = Depends(require_authenticated_user)):
+    cart_doc = firestore_client.collection('carts').document(current_user['id']).get()
+    cart = cart_doc.to_dict() if cart_doc.exists else None
+    if not cart or not cart.get('items'):
+        raise ValidationError("Cart is empty")
+    session_id = hashlib.md5(f"{current_user['id']}{datetime.now().isoformat()}".encode()).hexdigest()[:16]
+    firestore_client.collection('checkout_sessions').document(session_id).set({
+        "session_id": session_id,
+        "user_id": current_user['id'],
+        "cart_snapshot": cart,
+        "address_id": payload.address_id,
+        "status": "created",
+        "createdAt": datetime.now(),
+        "updatedAt": datetime.now()
+    })
+    return create_success_response(data={"session_id": session_id})
+
+class CheckoutConfirm(BaseModel):
+    session_id: str
+
+@app.post("/checkout/confirm", response_model=Dict[str, Any], summary="Confirm checkout session")
+async def confirm_checkout(payload: CheckoutConfirm, db: FirestoreEcommerceDB = Depends(get_db), current_user = Depends(require_authenticated_user)):
+    sess_ref = firestore_client.collection('checkout_sessions').document(payload.session_id)
+    sess = sess_ref.get()
+    if not sess.exists:
+        raise NotFoundError("Checkout session not found")
+    sdata = sess.to_dict()
+    if sdata.get('user_id') != current_user['id']:
+        raise AuthorizationError("You can only confirm your own session")
+    order_payload = {
+        "customer_id": current_user['id'],
+        "seller_id": sdata['cart_snapshot']['items'][0].get('seller_id') if sdata['cart_snapshot'].get('items') else "",
+        "items": sdata['cart_snapshot'].get('items', []),
+        "total_amount": sdata['cart_snapshot'].get('total_amount', 0.0),
+        "currency": sdata['cart_snapshot'].get('currency', 'USD'),
+        "shipping_address": {}
+    }
+    result = db.create_order(order_payload)
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    db.clear_cart(current_user['id'])
+    sess_ref.update({"status": "confirmed", "updatedAt": datetime.now(), "order_id": result.get('data', {}).get('order_id')})
+    return create_success_response(data={"order_id": result.get('data', {}).get('order_id')}, message="Checkout confirmed")
+
+# ==================== RETURNS / RMA ====================
+
+class ReturnCreate(BaseModel):
+    order_id: str
+    reason: str
+    items: Optional[List[Dict[str, Any]]] = None
+
+class ReturnUpdate(BaseModel):
+    status: Optional[str] = Field(None, pattern=r'^(requested|approved|rejected|received|refunded)$')
+    admin_notes: Optional[str] = None
+
+@app.post("/returns", response_model=Dict[str, Any], summary="Create return request")
+async def create_return(payload: ReturnCreate, current_user = Depends(require_authenticated_user)):
+    ref = firestore_client.collection('returns').document()
+    ref.set({**payload.dict(), "return_id": ref.id, "user_id": current_user['id'], "status": "requested", "createdAt": datetime.now(), "updatedAt": datetime.now()})
+    return create_success_response(data={"return_id": ref.id}, message="Return requested")
+
+@app.get("/returns", response_model=Dict[str, Any], summary="List my returns")
+async def list_my_returns(current_user = Depends(require_authenticated_user)):
+    docs = list(firestore_client.collection('returns').where('user_id', '==', current_user['id']).stream())
+    return create_success_response(data=[d.to_dict() for d in docs])
+
+@app.get("/admin/returns", response_model=Dict[str, Any], summary="List all returns")
+async def list_all_returns(admin = Depends(require_admin)):
+    docs = list(firestore_client.collection('returns').stream())
+    return create_success_response(data=[d.to_dict() for d in docs])
+
+@app.patch("/admin/returns/{return_id}", response_model=Dict[str, Any], summary="Update return")
+async def update_return(return_id: str = Path(...), update: ReturnUpdate = Body(...), admin = Depends(require_admin)):
+    ref = firestore_client.collection('returns').document(return_id)
+    if not ref.get().exists:
+        raise NotFoundError("Return not found")
+    ref.update({**update.dict(exclude_unset=True), "updatedAt": datetime.now()})
+    return create_success_response(message="Return updated")
+
+# ==================== ANALYTICS EVENTS ====================
+
+class AnalyticsEvent(BaseModel):
+    event: str
+    user_id: Optional[str] = None
+    product_id: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+@app.post("/analytics/events", response_model=Dict[str, Any], summary="Capture analytics event")
+async def capture_event(payload: AnalyticsEvent, request: Request, user = Depends(get_optional_user)):
+    ref = firestore_client.collection('events').document()
+    ref.set({
+        **payload.dict(),
+        "event_id": ref.id,
+        "user_id": (user or {}).get('id') or payload.user_id,
+        "ip": request.client.host if request.client else None,
+        "user_agent": request.headers.get('user-agent'),
+        "createdAt": datetime.now()
+    })
+    return create_success_response(message="Event captured")
+
 # ==================== STARTUP EVENT ====================
 
 @app.on_event("startup")
