@@ -1760,6 +1760,33 @@ async def update_user_profile(
         logger.error(f"Error updating user profile: {str(e)}")
         raise APIError(500, "Failed to update user profile", "INTERNAL_ERROR")
 
+# ==================== FRONTEND COMPAT: /users/me ====================
+
+@app.get("/users/me", response_model=Dict[str, Any], summary="Get my user profile")
+async def get_my_user_profile(
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Return the authenticated user's Firestore profile (for frontend hooks)."""
+    result = db.get_user_profile(current_user['id'])
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return result
+
+@app.put("/users/me", response_model=Dict[str, Any], summary="Update my user profile")
+async def put_my_user_profile(
+    user_data: UserUpdate,
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Update the authenticated user's Firestore profile (for frontend hooks)."""
+    update_data = user_data.dict(exclude_unset=True)
+    update_data['updatedAt'] = datetime.now()
+    result = db.update_user_profile(current_user['id'], update_data)
+    if not result['success']:
+        raise APIError(400, result['error'], "DATABASE_ERROR")
+    return create_success_response(message="Profile updated", data={"updated_fields": list(update_data.keys())})
+
 # ==================== USER ENDPOINTS ====================
 
 @app.post("/users", response_model=Dict[str, Any], summary="Create user profile")
