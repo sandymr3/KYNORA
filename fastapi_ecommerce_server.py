@@ -1424,7 +1424,12 @@ class UserCreate(BaseModel):
         }
 
 class UserUpdate(BaseModel):
+    # Frontend may send either name or displayName
     name: Optional[str] = Field(None, min_length=1, max_length=100, description="User's full name")
+    displayName: Optional[str] = Field(None, min_length=1, max_length=100, description="Display name")
+    # Avatar may be sent as avatar or photoURL
+    photoURL: Optional[str] = Field(None, description="Photo URL / Avatar URL")
+    avatar: Optional[str] = Field(None, description="Alias for photoURL")
     phone: Optional[str] = Field(None, pattern=r'^\+?[\d\s\-\(\)]{10,15}$', description="Phone number")
     address: Optional[Dict[str, Any]] = Field(None, description="User address")
     preferences: Optional[Dict[str, Any]] = Field(None, description="User preferences")
@@ -1739,6 +1744,11 @@ async def update_user_profile(
     try:
         # Users can only update their own profile
         update_data = profile_data.dict(exclude_unset=True)
+        # Map common frontend fields to Firestore schema
+        if 'name' in update_data and update_data['name']:
+            update_data['displayName'] = update_data.pop('name')
+        if 'avatar' in update_data and update_data['avatar']:
+            update_data['photoURL'] = update_data.pop('avatar')
         update_data['updatedAt'] = datetime.now()
         
         result = db.update_user_profile(current_user['id'], update_data)
