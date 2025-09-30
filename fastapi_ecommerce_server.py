@@ -157,12 +157,11 @@ app = FastAPI(
 # CORS middleware for frontend applications with authentication support
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
+    allows=[
         "http://localhost:3000",  # Next.js development
         "http://localhost:3001",  # React development
         "http://localhost:5173",  # Vite development
-        "https://kynora.onrender.com", 
-        "https://kynora.onrender.com/docs"
+        "https://kynora.onrender.com"
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -1698,18 +1697,24 @@ async def test_authentication(
         raise APIError(500, "Authentication test failed", "INTERNAL_ERROR")
 
 @app.get("/users/profile", response_model=Dict[str, Any], summary="Get detailed user profile")
+@cached_response(ttl_seconds=180, vary_by_user=True)
 async def get_detailed_user_profile(
     db: FirestoreEcommerceDB = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """Get detailed user profile with preferences and settings"""
+    """Get detailed user profile with preferences and settings.
+
+    Optimizations:
+    - Cached per-user for 180s using in-memory cache.
+    - Returns a combined shape merging Firebase auth and Firestore profile.
+    """
     try:
         result = db.get_user_profile(current_user['id'])
         if not result['success']:
             raise APIError(400, result['error'], "DATABASE_ERROR")
-        
+
         user_data = result.get('data', {})
-        
+
         # Merge Firebase auth data with Firestore profile data
         detailed_profile = {
             **current_user,
@@ -1717,17 +1722,17 @@ async def get_detailed_user_profile(
             "last_updated": user_data.get('updatedAt', ''),
             "member_since": user_data.get('createdAt', ''),
             "profile_complete": bool(
-                user_data.get('displayName') and 
-                user_data.get('phone') and 
+                user_data.get('displayName') and
+                user_data.get('phone') and
                 user_data.get('address', {}).get('street')
-            )
+            ),
         }
-        
+
         return create_success_response(
             data=detailed_profile,
             message="Detailed user profile retrieved successfully"
         )
-        
+
     except APIError as e:
         raise e
     except Exception as e:
@@ -1754,7 +1759,12 @@ async def update_user_profile(
         result = db.update_user_profile(current_user['id'], update_data)
         if not result['success']:
             raise APIError(400, result['error'], "DATABASE_ERROR")
-        
+        # Invalidate cached detailed profile for this user so the next fetch is fresh
+        try:
+            invalidate_cache_pattern("get_detailed_user_profile")
+        except Exception:
+            pass
+
         return create_success_response(
             data={
                 "user_id": current_user['id'],
