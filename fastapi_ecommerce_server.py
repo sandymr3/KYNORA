@@ -157,7 +157,7 @@ app = FastAPI(
 # CORS middleware for frontend applications with authentication support
 app.add_middleware(
     CORSMiddleware,
-    allows=[
+    allow_origins=[
         "http://localhost:3000",  # Next.js development
         "http://localhost:8000",  # React development
         "http://localhost:5173",  # Vite development
