@@ -159,7 +159,7 @@ app.add_middleware(
     CORSMiddleware,
     allows=[
         "http://localhost:3000",  # Next.js development
-        "http://localhost:3001",  # React development
+        "http://localhost:8000",  # React development
         "http://localhost:5173",  # Vite development
         "https://kynora.onrender.com"
     ],
