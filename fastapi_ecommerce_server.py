@@ -1780,6 +1780,44 @@ async def update_user_profile(
         logger.error(f"Error updating user profile: {str(e)}")
         raise APIError(500, "Failed to update user profile", "INTERNAL_ERROR")
 
+# Support PUT semantics for updating user profile to align with REST expectations
+@app.put("/users/profile", response_model=Dict[str, Any], summary="Update user profile")
+async def put_user_profile(
+    profile_data: UserUpdate,
+    db: FirestoreEcommerceDB = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """Alias of POST /users/profile to prevent extra frontend retries"""
+    try:
+        update_data = profile_data.dict(exclude_unset=True)
+        if 'name' in update_data and update_data['name']:
+            update_data['displayName'] = update_data.pop('name')
+        if 'avatar' in update_data and update_data['avatar']:
+            update_data['photoURL'] = update_data.pop('avatar')
+        update_data['updatedAt'] = datetime.now()
+
+        result = db.update_user_profile(current_user['id'], update_data)
+        if not result['success']:
+            raise APIError(400, result['error'], "DATABASE_ERROR")
+        try:
+            invalidate_cache_pattern("get_detailed_user_profile")
+        except Exception:
+            pass
+
+        return create_success_response(
+            data={
+                "user_id": current_user['id'],
+                "updated_fields": list(update_data.keys()),
+                "updated_at": update_data['updatedAt'].isoformat()
+            },
+            message="User profile updated successfully"
+        )
+    except APIError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating user profile via PUT: {str(e)}")
+        raise APIError(500, "Failed to update user profile", "INTERNAL_ERROR")
+
 # ==================== USER ENDPOINTS ====================
 
 @app.post("/users", response_model=Dict[str, Any], summary="Create user profile")
