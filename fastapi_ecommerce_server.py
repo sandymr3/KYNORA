@@ -1426,6 +1426,8 @@ class UserUpdate(BaseModel):
     # Frontend may send either name or displayName
     name: Optional[str] = Field(None, min_length=1, max_length=100, description="User's full name")
     displayName: Optional[str] = Field(None, min_length=1, max_length=100, description="Display name")
+    # Admin-only: may update another user's email via /users/{user_id}
+    email: Optional[str] = Field(None, pattern=r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', description="Email address (admin only)")
     # Avatar may be sent as avatar or photoURL
     photoURL: Optional[str] = Field(None, description="Photo URL / Avatar URL")
     avatar: Optional[str] = Field(None, description="Alias for photoURL")
@@ -1754,6 +1756,9 @@ async def update_user_profile(
             update_data['displayName'] = update_data.pop('name')
         if 'avatar' in update_data and update_data['avatar']:
             update_data['photoURL'] = update_data.pop('avatar')
+        # Prevent email changes via self-service endpoints; admin-only through /users/{user_id}
+        if 'email' in update_data:
+            update_data.pop('email', None)
         update_data['updatedAt'] = datetime.now()
         
         result = db.update_user_profile(current_user['id'], update_data)
@@ -1794,6 +1799,9 @@ async def put_user_profile(
             update_data['displayName'] = update_data.pop('name')
         if 'avatar' in update_data and update_data['avatar']:
             update_data['photoURL'] = update_data.pop('avatar')
+        # Prevent email changes via self-service endpoints; admin-only through /users/{user_id}
+        if 'email' in update_data:
+            update_data.pop('email', None)
         update_data['updatedAt'] = datetime.now()
 
         result = db.update_user_profile(current_user['id'], update_data)
@@ -1963,15 +1971,50 @@ async def update_user(
     db: FirestoreEcommerceDB = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """Update user profile"""
+    """Update user profile (admin can edit others; only admin can change email)"""
     # Users can only update their own profile unless admin
     if current_user['id'] != user_id and current_user['role'] != 'admin':
         raise HTTPException(status_code=403, detail="Access denied")
-    
-    result = db.update_user_profile(user_id, user_data.dict(exclude_unset=True))
+
+    update_data = user_data.dict(exclude_unset=True)
+    # Map common frontend fields to Firestore schema
+    if 'name' in update_data and update_data['name']:
+        update_data['displayName'] = update_data.pop('name')
+    if 'avatar' in update_data and update_data['avatar']:
+        update_data['photoURL'] = update_data.pop('avatar')
+
+    # Handle email update - admin only, and sync with Firebase Auth
+    if 'email' in update_data:
+        if current_user.get('role') != 'admin':
+            raise HTTPException(status_code=403, detail="Only admin can update email")
+        try:
+            auth.update_user(user_id, email=update_data['email'])
+            # Reflect verification state conservatively
+            update_data['emailVerified'] = False
+        except Exception as e:
+            logger.error(f"Failed to update Firebase Auth email for user {user_id}: {str(e)}")
+            raise APIError(400, f"Email update failed: {str(e)}", "EMAIL_UPDATE_FAILED")
+
+    update_data['updatedAt'] = datetime.now()
+
+    result = db.update_user_profile(user_id, update_data)
     if not result['success']:
         raise HTTPException(status_code=400, detail=result['error'])
-    return result
+
+    # Invalidate cached profiles so subsequent fetches are fresh
+    try:
+        invalidate_cache_pattern("get_detailed_user_profile")
+    except Exception:
+        pass
+
+    return create_success_response(
+        data={
+            "user_id": user_id,
+            "updated_fields": list(update_data.keys()),
+            "updated_at": update_data['updatedAt'].isoformat()
+        },
+        message="User profile updated successfully"
+    )
 
 @app.get("/users", response_model=Dict[str, Any], summary="Get users by role")
 async def get_users_by_role(
