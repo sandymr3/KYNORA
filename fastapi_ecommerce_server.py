@@ -159,7 +159,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",  # Next.js development
-        "http://localhost:8000",  # React development
+        "http://localhost:8001",  # React development
         "http://localhost:5173",  # Vite development
         "https://kynora.onrender.com"
     ],
@@ -1701,6 +1701,7 @@ async def test_authentication(
 @app.get("/users/profile", response_model=Dict[str, Any], summary="Get detailed user profile")
 @cached_response(ttl_seconds=180, vary_by_user=True)
 async def get_detailed_user_profile(
+    request: Request,
     db: FirestoreEcommerceDB = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
@@ -1711,6 +1712,8 @@ async def get_detailed_user_profile(
     - Returns a combined shape merging Firebase auth and Firestore profile.
     """
     try:
+        request_id = getattr(request.state, 'request_id', 'unknown')
+        api_logger.info(f"[{request_id}] GET /users/profile for user {current_user['id']}")
         result = db.get_user_profile(current_user['id'])
         if not result['success']:
             raise APIError(400, result['error'], "DATABASE_ERROR")
@@ -1730,6 +1733,13 @@ async def get_detailed_user_profile(
             ),
         }
 
+        # Ensure a 'name' field is present for frontend display
+        if not detailed_profile.get('name'):
+            detailed_profile['name'] = (
+                detailed_profile.get('displayName')
+                or (detailed_profile.get('email', '').split('@')[0] if detailed_profile.get('email') else 'User')
+            )
+
         return create_success_response(
             data=detailed_profile,
             message="Detailed user profile retrieved successfully"
@@ -1743,6 +1753,7 @@ async def get_detailed_user_profile(
 
 @app.post("/users/profile", response_model=Dict[str, Any], summary="Update user profile")
 async def update_user_profile(
+    request: Request,
     profile_data: UserUpdate,
     db: FirestoreEcommerceDB = Depends(get_db),
     current_user = Depends(get_current_user)
@@ -1750,6 +1761,7 @@ async def update_user_profile(
     """Update current user's profile information"""
     try:
         # Users can only update their own profile
+        request_id = getattr(request.state, 'request_id', 'unknown')
         update_data = profile_data.dict(exclude_unset=True)
         # Map common frontend fields to Firestore schema
         if 'name' in update_data and update_data['name']:
@@ -1759,8 +1771,19 @@ async def update_user_profile(
         # Prevent email changes via self-service endpoints; admin-only through /users/{user_id}
         if 'email' in update_data:
             update_data.pop('email', None)
+
+        # Normalize address field keys
+        if 'address' in update_data and isinstance(update_data['address'], dict):
+            addr = update_data['address']
+            if 'zipcode' in addr and 'zip_code' not in addr:
+                addr['zip_code'] = addr.pop('zipcode')
+            if 'pin' in addr and 'zip_code' not in addr:
+                addr['zip_code'] = addr.pop('pin')
+            update_data['address'] = addr
+
         update_data['updatedAt'] = datetime.now()
         
+        api_logger.info(f"[{request_id}] POST /users/profile by {current_user['id']} fields={list(update_data.keys())}")
         result = db.update_user_profile(current_user['id'], update_data)
         if not result['success']:
             raise APIError(400, result['error'], "DATABASE_ERROR")
@@ -1788,12 +1811,14 @@ async def update_user_profile(
 # Support PUT semantics for updating user profile to align with REST expectations
 @app.put("/users/profile", response_model=Dict[str, Any], summary="Update user profile")
 async def put_user_profile(
+    request: Request,
     profile_data: UserUpdate,
     db: FirestoreEcommerceDB = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
     """Alias of POST /users/profile to prevent extra frontend retries"""
     try:
+        request_id = getattr(request.state, 'request_id', 'unknown')
         update_data = profile_data.dict(exclude_unset=True)
         if 'name' in update_data and update_data['name']:
             update_data['displayName'] = update_data.pop('name')
@@ -1802,8 +1827,18 @@ async def put_user_profile(
         # Prevent email changes via self-service endpoints; admin-only through /users/{user_id}
         if 'email' in update_data:
             update_data.pop('email', None)
+
+        # Normalize address
+        if 'address' in update_data and isinstance(update_data['address'], dict):
+            addr = update_data['address']
+            if 'zipcode' in addr and 'zip_code' not in addr:
+                addr['zip_code'] = addr.pop('zipcode')
+            if 'pin' in addr and 'zip_code' not in addr:
+                addr['zip_code'] = addr.pop('pin')
+            update_data['address'] = addr
         update_data['updatedAt'] = datetime.now()
 
+        api_logger.info(f"[{request_id}] PUT /users/profile by {current_user['id']} fields={list(update_data.keys())}")
         result = db.update_user_profile(current_user['id'], update_data)
         if not result['success']:
             raise APIError(400, result['error'], "DATABASE_ERROR")
