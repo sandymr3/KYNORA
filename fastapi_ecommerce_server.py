@@ -158,6 +158,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "https://b4hfw7n6-3000.inc1.devtunnels.ms"
         "http://localhost:3000",  # Next.js development
         "http://localhost:8001",  # React development
         "http://localhost:5173",  # Vite development
