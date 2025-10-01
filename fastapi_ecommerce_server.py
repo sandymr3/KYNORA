@@ -505,6 +505,63 @@ def cached_response(ttl_seconds: int = 300, cache_key_params: List[str] = None,
         return wrapper
     return decorator
 
+@app.post("/products/{product_id}/view", response_model=Dict[str, Any], summary="Increment product view count")
+async def increment_product_view(
+    request: Request,
+    product_id: str = Path(..., description="Product ID")
+):
+    """Increment the product's view_count and return the new value.
+
+    - Public endpoint (no auth) so product pages can record views.
+    - Uses Firestore atomic increment when available; falls back to a transaction otherwise.
+    """
+    request_id = getattr(request.state, 'request_id', 'unknown')
+    try:
+        doc_ref = firestore_client.collection('products').document(product_id)
+        snap = doc_ref.get()
+        if not snap.exists:
+            raise NotFoundError(f"Product with ID '{product_id}' not found", resource_type="product", resource_id=product_id)
+
+        # Try atomic increment
+        try:
+            doc_ref.update({
+                'view_count': firestore.Increment(1),
+                'updatedAt': datetime.now()
+            })
+            snap2 = doc_ref.get()
+            new_count = int(snap2.to_dict().get('view_count', 0))
+        except Exception as inc_err:
+            # Fallback to transactional update
+            api_logger.warning(f"[{request_id}] Firestore Increment fallback for product {product_id}: {inc_err}")
+            transaction = firestore_client.transaction()
+
+            @firestore.transactional
+            def txn_update(txn):
+                current = doc_ref.get(transaction=txn)
+                data = current.to_dict() if current.exists else {}
+                view_count = int(data.get('view_count', 0)) + 1
+                txn.update(doc_ref, {
+                    'view_count': view_count,
+                    'updatedAt': datetime.now()
+                })
+                return view_count
+
+            new_count = txn_update(transaction)
+
+        api_logger.info(f"[{request_id}] Incremented view_count for product {product_id} -> {new_count}")
+        return create_success_response(
+            data={
+                'product_id': product_id,
+                'view_count': new_count
+            },
+            message="Product view count incremented"
+        )
+    except NotFoundError as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error incrementing view for product {product_id}: {str(e)}")
+        raise APIError(500, "Failed to increment product view", "INTERNAL_ERROR")
+
 # Cache invalidation helper
 def invalidate_cache_pattern(pattern: str) -> None:
     """Invalidate cache entries matching a pattern"""
