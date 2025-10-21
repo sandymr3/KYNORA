@@ -1,0 +1,54 @@
+# Core Framework
+fastapi==0.103.2
+uvicorn[standard]==0.24.0
+
+# Firebase & Database
+firebase-admin==6.2.0
+google-cloud-firestore==2.13.1
+
+# Data Validation & Serialization
+pydantic==1.10.13
+python-email-validator==2.1.0
+
+# Environment & Config
+python-dotenv==1.0.0
+python-decouple==3.8
+
+# Authentication & Security
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.6
+
+# Cloud Storage
+cloudinary==1.36.0
+
+# HTTP & Async
+httpx==0.25.2
+aiohttp==3.9.1
+aiofiles==23.2.1
+
+# CORS Support
+fastapi-cors==0.0.6
+
+# Logging
+loguru==0.7.2
+
+# Date & Time
+python-dateutil==2.8.2
+
+# Text Processing
+python-slugify==8.0.1
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+httpx==0.25.2
+
+# Development
+black==23.12.0
+flake8==6.1.0
+autopep8==2.0.4
+
+# Redis (optional for caching)
+redis==5.0.1
+aioredis==2.0.1

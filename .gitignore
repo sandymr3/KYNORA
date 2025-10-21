@@ -1,0 +1,27 @@
+# Environment/config files
+.env
+.env.local
+.env.*.local
+config.ini
+secrets.ini
+
+# Security files
+*.key
+*.pem
+*.crt
+*.cert
+
+# Python cache and modules
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE and OS files
+.DS_Store
+.idea/
+.vscode/
+
+# Markdown files (except README.md)
+*.md
+!README.md

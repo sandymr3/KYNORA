@@ -1,0 +1,179 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function getUserRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+    
+    function isAdmin() {
+      return isAuthenticated() && getUserRole() in ['admin', 'manager'];
+    }
+    
+    function isSeller() {
+      return isAuthenticated() && getUserRole() in ['seller', 'admin'];
+    }
+    
+    function hasProductOwnership(productId) {
+      let product = get(/databases/$(database)/documents/products/$(productId));
+      return product.exists && (product.data.seller_id == request.auth.uid || isAdmin());
+    }
+    
+    // ============ Users Collection ============
+    match /users/{userId} {
+      // Users can read their own profile
+      allow read: if isOwner(userId) || isAdmin();
+      
+      // Users can create account on signup
+      allow create: if isOwner(userId) && !('role' in request.resource.data);
+      
+      // Users can update their own profile (except role)
+      allow update: if isOwner(userId) && 
+        (!('role' in request.resource.data) || 
+         request.resource.data.role == resource.data.role);
+      
+      // Only admins can modify user roles/status
+      allow update: if isAdmin();
+      
+      // Only admins can delete
+      allow delete: if isAdmin();
+    }
+    
+    // ============ Products Collection ============
+    match /products/{productId} {
+      // Everyone can read active products
+      allow read: if resource.data.status == 'active';
+      
+      // Sellers can read their own products
+      allow read: if isSeller() && resource.data.seller_id == request.auth.uid;
+      
+      // Admins can read all
+      allow read: if isAdmin();
+      
+      // Sellers can create products
+      allow create: if isSeller() && 
+        request.resource.data.seller_id == request.auth.uid &&
+        request.resource.data.status in ['draft', 'active'];
+      
+      // Sellers can update own products
+      allow update: if hasProductOwnership(productId);
+      
+      // Only admins can feature products
+      allow update: if isAdmin();
+      
+      // Only admins can delete
+      allow delete: if isAdmin();
+    }
+    
+    // ============ Categories Collection ============
+    match /categories/{categoryId} {
+      // Everyone can read categories
+      allow read: if true;
+      
+      // Only admins can write
+      allow write: if isAdmin();
+    }
+    
+    // ============ Carts Collection ============
+    match /carts/{userId} {
+      // Users can read/write own cart
+      allow read, write: if isOwner(userId);
+      
+      // Admins can read all carts
+      allow read: if isAdmin();
+    }
+    
+    // ============ Orders Collection ============
+    match /orders/{orderId} {
+      // Users can read their own orders
+      allow read: if isOwner(resource.data.user_id);
+      
+      // Admins can read all orders
+      allow read: if isAdmin();
+      
+      // Authenticated users can create orders
+      allow create: if isAuthenticated() && 
+        request.resource.data.user_id == request.auth.uid;
+      
+      // Users can update their own orders (limited fields)
+      allow update: if isOwner(resource.data.user_id) && 
+        request.resource.data.status in ['cancelled'] &&
+        resource.data.status in ['pending', 'confirmed'];
+      
+      // Only admins can update order status
+      allow update: if isAdmin();
+      
+      // Orders are never deleted (soft delete only)
+      allow delete: if false;
+    }
+    
+    // ============ Reviews Collection ============
+    match /reviews/{reviewId} {
+      // Everyone can read approved reviews
+      allow read: if resource.data.status == 'approved';
+      
+      // Authenticated users can read all reviews
+      allow read: if isAuthenticated();
+      
+      // Authenticated users can create reviews
+      allow create: if isAuthenticated() && 
+        request.resource.data.user_id == request.auth.uid;
+      
+      // Review owners can update own reviews
+      allow update: if isOwner(resource.data.user_id) && 
+        request.resource.data.status == resource.data.status;
+      
+      // Admins can update any review
+      allow update: if isAdmin();
+      
+      // Only admins can delete
+      allow delete: if isAdmin();
+      
+      // Helpful votes subcollection
+      match /helpful_votes/{userId} {
+        allow read: if true;
+        allow create, delete: if isOwner(userId);
+        allow update: if false;
+      }
+    }
+    
+    // ============ Wishlists Collection ============
+    match /wishlists/{userId} {
+      allow read, write: if isOwner(userId);
+      allow read: if isAdmin();
+    }
+    
+    // ============ Notifications Collection ============
+    match /notifications/{notificationId} {
+      // Users can read their own notifications
+      allow read: if isOwner(resource.data.user_id);
+      
+      // Only backend/admin can create notifications
+      allow create: if isAdmin();
+      
+      // Users can update read status
+      allow update: if isOwner(resource.data.user_id) && 
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read', 'read_at']);
+      
+      // Users can delete their own notifications
+      allow delete: if isOwner(resource.data.user_id);
+    }
+    
+    // ============ Analytics Collection ============
+    match /analytics/{document=**} {
+      // Only admins can read analytics
+      allow read: if isAdmin();
+      // Only backend can write (via Cloud Functions)
+      allow write: if false;
+    }
+  }
+}
