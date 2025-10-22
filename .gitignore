@@ -237,6 +237,18 @@ $RECYCLE.BIN/
 node_modules/
 package-lock.json
 
-*md 
-!readme.md 
+# Keep Markdown docs tracked; don't ignore all .md files
+# (previously '*md' was too broad and could hide README files)
+
+# Local virtualenvs created during testing
+.venv-test/
+.venv/
+venv/
+ENV/
+env/
+
+# Railway/Docker
+.railway/
+.docker/
+
 

@@ -69,4 +69,5 @@ redis==5.0.1
 # Note: aioredis is deprecated, use redis[hiredis] instead
 
 # Process manager for production (optional on Railway)
-gunicorn==22.1.0
+# Use a valid released version
+gunicorn==23.0.0
