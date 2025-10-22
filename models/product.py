@@ -30,7 +30,7 @@ class ProductSEO(BaseModel):
 
 
 class Product(BaseDocument):
-    """Product model for Firestore"""
+    """Product model for artisan/handmade products"""
     product_id: str = Field(..., description="Product ID")
     title: str
     slug: str
@@ -40,12 +40,28 @@ class Product(BaseDocument):
     compare_at_price: Optional[float] = Field(None, ge=0, description="Original price for discounts")
     cost_price: Optional[float] = Field(None, ge=0, description="Seller cost (admin only)")
     
-    category_id: str
+    # Categories for artisan products
+    category_id: str  # e.g., "pottery", "handmade-toys", "crafts", "art"
     subcategory_id: Optional[str] = None
     seller_id: str
+    artisan_name: Optional[str] = Field(None, description="Name of the artisan/craftsperson")
     
     images: List[str] = Field(default_factory=list, description="Product image URLs")
     thumbnail: Optional[str] = None
+    
+    # Artisan product specifications
+    material: Optional[str] = Field(None, description="Primary material (e.g., clay, wood, fabric)")
+    crafting_method: Optional[str] = Field(None, description="How it's made (e.g., hand-thrown, carved, sewn)")
+    customizable: bool = Field(default=False, description="Can be customized on request")
+    made_to_order: bool = Field(default=False, description="Made to order vs ready stock")
+    processing_time: Optional[int] = Field(None, description="Days needed to make/process if made to order")
+    
+    # Additional artisan details
+    care_instructions: Optional[str] = Field(None, description="How to care for the product")
+    origin_location: Optional[str] = Field(None, description="Where the product is made")
+    is_eco_friendly: bool = Field(default=False, description="Made with eco-friendly materials/processes")
+    is_handmade: bool = Field(default=True, description="Handmade vs machine made")
+    uniqueness_note: Optional[str] = Field(None, description="Note about product variations")
     
     specifications: Dict[str, Any] = Field(default_factory=dict)
     tags: List[str] = Field(default_factory=list)
@@ -121,7 +137,7 @@ class Product(BaseDocument):
 
 
 class ProductCreate(BaseModel):
-    """Product creation request model"""
+    """Product creation request model for artisan products"""
     title: str
     slug: str
     description: str
@@ -132,6 +148,21 @@ class ProductCreate(BaseModel):
     
     category_id: str
     subcategory_id: Optional[str] = None
+    artisan_name: Optional[str] = None
+    
+    # Artisan product specifications
+    material: Optional[str] = None
+    crafting_method: Optional[str] = None
+    customizable: bool = Field(default=False)
+    made_to_order: bool = Field(default=False)
+    processing_time: Optional[int] = None
+    
+    # Additional artisan details
+    care_instructions: Optional[str] = None
+    origin_location: Optional[str] = None
+    is_eco_friendly: bool = Field(default=False)
+    is_handmade: bool = Field(default=True)
+    uniqueness_note: Optional[str] = None
     
     images: List[str] = Field(default_factory=list)
     specifications: Dict[str, Any] = Field(default_factory=dict)
@@ -150,7 +181,7 @@ class ProductCreate(BaseModel):
 
 
 class ProductUpdate(BaseModel):
-    """Product update request model"""
+    """Product update request model for artisan products"""
     title: Optional[str] = None
     slug: Optional[str] = None
     description: Optional[str] = None
@@ -161,6 +192,21 @@ class ProductUpdate(BaseModel):
     
     category_id: Optional[str] = None
     subcategory_id: Optional[str] = None
+    artisan_name: Optional[str] = None
+    
+    # Artisan product specifications
+    material: Optional[str] = None
+    crafting_method: Optional[str] = None
+    customizable: Optional[bool] = None
+    made_to_order: Optional[bool] = None
+    processing_time: Optional[int] = None
+    
+    # Additional artisan details
+    care_instructions: Optional[str] = None
+    origin_location: Optional[str] = None
+    is_eco_friendly: Optional[bool] = None
+    is_handmade: Optional[bool] = None
+    uniqueness_note: Optional[str] = None
     
     images: Optional[List[str]] = None
     specifications: Optional[Dict[str, Any]] = None

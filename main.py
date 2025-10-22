@@ -31,6 +31,8 @@ from endpoints import (
     reviews,
     categories
 )
+# Import additional routers
+from routers import wishlist, recently_viewed, newsletter, product_comparison
 
 # Configure logging
 logging.basicConfig(
@@ -76,6 +78,10 @@ app.include_router(cart.router, prefix="/cart", tags=["Cart"])
 app.include_router(orders.router, prefix="/orders", tags=["Orders"])
 app.include_router(reviews.router, prefix="/reviews", tags=["Reviews"])
 app.include_router(categories.router, prefix="/categories", tags=["Categories"])
+app.include_router(wishlist.router, prefix="/wishlist", tags=["Wishlist"])
+app.include_router(recently_viewed.router, prefix="/recently-viewed", tags=["Recently Viewed"])
+app.include_router(newsletter.router, prefix="/newsletter", tags=["Newsletter"])
+app.include_router(product_comparison.router, tags=["Product Comparison"])
 
 # Root endpoint - redirect to docs
 @app.get("/", include_in_schema=False)

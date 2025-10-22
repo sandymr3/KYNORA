@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from typing import Optional, List
 import logging
+from datetime import datetime
 
 from config.firebase import db
 from models.product import (
@@ -296,7 +297,6 @@ async def archive_product(
             )
         
         # Archive product
-        from datetime import datetime
         db.collection('products').document(product_id).update({
             'status': 'archived',
             'deleted_at': datetime.utcnow(),
@@ -323,6 +323,265 @@ async def archive_product(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to archive product"
+        )
+
+
+@router.delete("/{product_id}")
+async def delete_product(
+    product_id: str,
+    current_user = Depends(require_seller)
+):
+    """Delete product permanently"""
+    try:
+        # Get product
+        product_doc = db.collection('products').document(product_id).get()
+        
+        if not product_doc.exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Product not found"
+            )
+        
+        product_data = product_doc.to_dict()
+        
+        # Check ownership
+        if current_user.role != 'admin' and product_data.get('seller_id') != current_user.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only delete your own products"
+            )
+        
+        # Delete product
+        db.collection('products').document(product_id).delete()
+        
+        # Update category product count
+        if product_data.get('category_id'):
+            category_ref = db.collection('categories').document(product_data['category_id'])
+            category_doc = category_ref.get()
+            if category_doc.exists:
+                current_count = category_doc.to_dict().get('product_count', 0)
+                category_ref.update({'product_count': max(0, current_count - 1)})
+        
+        return {
+            "success": True,
+            "message": "Product deleted successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting product: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete product"
+        )
+
+
+@router.patch("/{product_id}/unarchive")
+async def unarchive_product(
+    product_id: str,
+    current_user = Depends(require_seller)
+):
+    """Restore archived product"""
+    try:
+        # Get product
+        product_doc = db.collection('products').document(product_id).get()
+        
+        if not product_doc.exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Product not found"
+            )
+        
+        product_data = product_doc.to_dict()
+        
+        # Check ownership
+        if current_user.role != 'admin' and product_data.get('seller_id') != current_user.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only restore your own products"
+            )
+        
+        # Restore product
+        db.collection('products').document(product_id).update({
+            'status': 'active',
+            'deleted_at': None,
+            'updated_at': datetime.utcnow()
+        })
+        
+        # Update category product count
+        if product_data.get('category_id'):
+            category_ref = db.collection('categories').document(product_data['category_id'])
+            category_doc = category_ref.get()
+            if category_doc.exists:
+                current_count = category_doc.to_dict().get('product_count', 0)
+                category_ref.update({'product_count': current_count + 1})
+        
+        return {
+            "success": True,
+            "message": "Product restored successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error restoring product: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to restore product"
+        )
+
+
+@router.patch("/{product_id}/activate")
+async def activate_product(
+    product_id: str,
+    current_user = Depends(require_seller)
+):
+    """Activate product"""
+    try:
+        # Get product
+        product_doc = db.collection('products').document(product_id).get()
+        
+        if not product_doc.exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Product not found"
+            )
+        
+        product_data = product_doc.to_dict()
+        
+        # Check ownership
+        if current_user.role != 'admin' and product_data.get('seller_id') != current_user.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only activate your own products"
+            )
+        
+        # Activate product
+        db.collection('products').document(product_id).update({
+            'status': 'active',
+            'is_active': True,
+            'updated_at': datetime.utcnow()
+        })
+        
+        return {
+            "success": True,
+            "message": "Product activated successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error activating product: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to activate product"
+        )
+
+
+@router.patch("/{product_id}/deactivate")
+async def deactivate_product(
+    product_id: str,
+    current_user = Depends(require_seller)
+):
+    """Deactivate product"""
+    try:
+        # Get product
+        product_doc = db.collection('products').document(product_id).get()
+        
+        if not product_doc.exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Product not found"
+            )
+        
+        product_data = product_doc.to_dict()
+        
+        # Check ownership
+        if current_user.role != 'admin' and product_data.get('seller_id') != current_user.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only deactivate your own products"
+            )
+        
+        # Deactivate product
+        db.collection('products').document(product_id).update({
+            'status': 'inactive',
+            'is_active': False,
+            'updated_at': datetime.utcnow()
+        })
+        
+        return {
+            "success": True,
+            "message": "Product deactivated successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deactivating product: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to deactivate product"
+        )
+
+
+@router.post("/{product_id}/duplicate")
+async def duplicate_product(
+    product_id: str,
+    current_user = Depends(require_seller)
+):
+    """Duplicate a product"""
+    try:
+        # Get original product
+        product_doc = db.collection('products').document(product_id).get()
+        
+        if not product_doc.exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Product not found"
+            )
+        
+        product_data = product_doc.to_dict()
+        
+        # Check ownership
+        if current_user.role != 'admin' and product_data.get('seller_id') != current_user.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only duplicate your own products"
+            )
+        
+        # Create new product with updated details
+        new_product_id = Helpers.generate_id("prod")
+        new_product_data = product_data.copy()
+        
+        # Update fields for the duplicate
+        new_product_data['product_id'] = new_product_id
+        new_product_data['title'] = f"{product_data['title']} (Copy)"
+        new_product_data['slug'] = Helpers.generate_slug(new_product_data['title'])
+        new_product_data['sku'] = f"{product_data.get('sku', '')}_copy" if product_data.get('sku') else None
+        new_product_data['status'] = 'draft'
+        new_product_data['view_count'] = 0
+        new_product_data['sales_count'] = 0
+        new_product_data['created_at'] = datetime.utcnow()
+        new_product_data['updated_at'] = datetime.utcnow()
+        
+        # Save duplicated product
+        db.collection('products').document(new_product_id).set(new_product_data)
+        
+        return {
+            "success": True,
+            "message": "Product duplicated successfully",
+            "product_id": new_product_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error duplicating product: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to duplicate product"
         )
 
 
@@ -456,6 +715,60 @@ async def search_products(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to search products"
+        )
+
+
+@router.get("/active", response_model=ProductListResponse)
+async def get_active_products(
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    category_id: Optional[str] = None,
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None
+):
+    """Get all active products"""
+    try:
+        # Build query for active products only
+        query = db.collection('products').where('status', '==', 'active')
+        
+        if category_id:
+            query = query.where('category_id', '==', category_id)
+        if min_price is not None:
+            query = query.where('price', '>=', min_price)
+        if max_price is not None:
+            query = query.where('price', '<=', max_price)
+        
+        # Get all documents
+        all_docs = list(query.stream())
+        total = len(all_docs)
+        
+        # Apply pagination
+        start_idx = (page - 1) * limit
+        end_idx = start_idx + limit
+        paginated_docs = all_docs[start_idx:end_idx]
+        
+        # Convert to Product objects
+        products = []
+        for doc in paginated_docs:
+            product_data = doc.to_dict()
+            product_data['product_id'] = doc.id
+            products.append(Product(**product_data))
+        
+        # Calculate pagination
+        pagination = Helpers.calculate_pagination(total, page, limit)
+        
+        return ProductListResponse(
+            success=True,
+            message="Active products retrieved successfully",
+            products=products,
+            **pagination
+        )
+        
+    except Exception as e:
+        logger.error(f"Error getting active products: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve active products"
         )
 
 

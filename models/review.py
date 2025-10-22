@@ -28,7 +28,7 @@ class Review(BaseDocument):
     review_id: str = Field(..., description="Review ID")
     product_id: str
     user_id: str
-    order_id: str = Field(..., description="Order ID for verification")
+    order_id: Optional[str] = Field(None, description="Order ID for verification (optional)")
     
     rating: int = Field(..., ge=1, le=5, description="Rating from 1 to 5")
     title: str = Field(..., max_length=100)
@@ -76,7 +76,7 @@ class Review(BaseDocument):
 class ReviewCreate(BaseModel):
     """Review creation request model"""
     product_id: str
-    order_id: str
+    order_id: Optional[str] = None
     rating: int = Field(..., ge=1, le=5)
     title: str = Field(..., max_length=100)
     content: str = Field(..., min_length=10, max_length=1000)

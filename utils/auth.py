@@ -230,6 +230,27 @@ async def require_admin(current_user: TokenData = Depends(get_current_user)) -> 
     return current_user
 
 
+async def get_current_user_optional(credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False))) -> Optional[TokenData]:
+    """
+    Get current user from JWT token if provided (optional authentication)
+    
+    Args:
+        credentials: Bearer token credentials (optional)
+        
+    Returns:
+        Optional[TokenData]: Current user data or None
+    """
+    if not credentials:
+        return None
+    
+    try:
+        token = credentials.credentials
+        token_data = AuthUtils.verify_token(token)
+        return token_data
+    except:
+        return None
+
+
 async def require_seller(current_user: TokenData = Depends(get_current_user)) -> TokenData:
     """
     Require seller role

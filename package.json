@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "firebase-admin": "^13.5.0",
     "uvicorn": "^0.0.1-security"
   }
 }

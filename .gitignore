@@ -1,27 +1,238 @@
-# Environment/config files
+# ============================================
+# KYNORA BACKEND - GITIGNORE
+# ============================================
+
+# ============================================
+# 🔒 SENSITIVE FILES - NEVER COMMIT!
+# ============================================
 .env
 .env.local
+.env.production
 .env.*.local
-config.ini
-secrets.ini
-
-# Security files
-*.key
+*.env
+serviceAccountKey.json
+firebase-adminsdk-*.json
 *.pem
-*.crt
+*.key
 *.cert
+.firebase/
+.firebaserc
 
-# Python cache and modules
+# ============================================
+# PYTHON
+# ============================================
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
-# IDE and OS files
-.DS_Store
-.idea/
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+.pyenv/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Translations
+*.mo
+*.pot
+
+# Frameworks
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+instance/
+.webassets-cache
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+.pybuilder/
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# poetry
+poetry.lock
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# Cython debug symbols
+cython_debug/
+
+# ============================================
+# IDE & EDITOR FILES
+# ============================================
 .vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+*~
+.DS_Store
+Thumbs.db
+*.sublime-project
+*.sublime-workspace
 
-# Markdown files (except README.md)
-*.md
-!README.md
+# ============================================
+# 🧪 TEST FILES & TEMPORARY FILES
+# ============================================
+test_*.py
+*_test.py
+tests/__pycache__/
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.backup
+*.old
+
+# Specific test files in your project
+test_api.py
+test_backend.py
+test_cart_and_reviews.py
+test_endpoints.py
+test_featured.py
+test_fixes.py
+test_imports.py
+test_models.py
+test_reviews_endpoint.py
+test_user_import.py
+test_view_count.py
+auth_test.py
+
+# ============================================
+# 📝 LOG FILES
+# ============================================
+*.log
+logs/
+*.log.*
+kynora.log
+debug.log
+error.log
+access.log
+
+# ============================================
+# DATABASE FILES
+# ============================================
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# ============================================
+# BACKUP FILES
+# ============================================
+backup/
+backups/
+*.backup
+*.bak
+
+# ============================================
+# DEPLOYMENT & BUILD SCRIPTS
+# ============================================
+run_backend.py
+simple_main.py
+deploy_indexes_direct.py
+generate-jwt.js
+generate_jwt.py
+get_token.bat
+get_token.ps1
+setup.bat
+setup_emulator.bat
+start.bat
+start_emulator.bat
+create_indexes_rest.py
+
+# ============================================
+# DOCUMENTATION (Development notes)
+# ============================================
+MOCK_DATA_REMOVED.md
+FIXES_COMPLETED.md
+ARTISAN_MARKETPLACE_SETUP.md
+PRODUCTION_SETUP.md
+
+# ============================================
+# OS FILES
+# ============================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# ============================================
+# MISC
+# ============================================
+*.pyc
+.coverage
+.pytest_cache/
+node_modules/
+package-lock.json

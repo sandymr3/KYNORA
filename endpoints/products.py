@@ -15,94 +15,7 @@ from core.models import ProductCreate, ProductUpdate
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Sample data for development
-SAMPLE_PRODUCTS = [
-    {
-        "id": "prod_001",
-        "product_id": "prod_001",
-        "title": "Wireless Headphones",
-        "description": "Premium wireless headphones with noise cancellation",
-        "price": 199.99,
-        "category_id": "electronics",
-        "seller_id": "seller_001",
-        "images": ["https://images.unsplash.com/photo-1505740420928-5e560c06d30e?w=300"],
-        "inventory_quantity": 50,
-        "tags": ["electronics", "audio"],
-        "is_featured": True,
-        "status": "active",
-        "view_count": 120,
-        "average_rating": 4.5,
-        "review_count": 23,
-    },
-    {
-        "id": "prod_002",
-        "product_id": "prod_002",
-        "title": "Smart Watch",
-        "description": "Advanced fitness tracking smartwatch",
-        "price": 299.99,
-        "category_id": "electronics",
-        "seller_id": "seller_001",
-        "images": ["https://images.unsplash.com/photo-1523275335684-37898b6baf30?w=300"],
-        "inventory_quantity": 30,
-        "tags": ["electronics", "wearable"],
-        "is_featured": True,
-        "status": "active",
-        "view_count": 85,
-        "average_rating": 4.3,
-        "review_count": 15,
-    },
-    {
-        "id": "prod_003",
-        "product_id": "prod_003",
-        "title": "Laptop Backpack",
-        "description": "Durable laptop backpack with USB charging port",
-        "price": 79.99,
-        "category_id": "accessories",
-        "seller_id": "seller_002",
-        "images": ["https://images.unsplash.com/photo-1553062407-98eeb64c6a62?w=300"],
-        "inventory_quantity": 100,
-        "tags": ["accessories", "bags"],
-        "is_featured": False,
-        "status": "active",
-        "view_count": 45,
-        "average_rating": 4.7,
-        "review_count": 8,
-    },
-    {
-        "id": "prod_004",
-        "product_id": "prod_004",
-        "title": "Bluetooth Speaker",
-        "description": "Portable waterproof Bluetooth speaker",
-        "price": 59.99,
-        "category_id": "electronics",
-        "seller_id": "seller_001",
-        "images": ["https://images.unsplash.com/photo-1608043152269-423dbba4e7e1?w=300"],
-        "inventory_quantity": 75,
-        "tags": ["electronics", "audio", "portable"],
-        "is_featured": True,
-        "status": "active",
-        "view_count": 200,
-        "average_rating": 4.6,
-        "review_count": 45,
-    },
-    {
-        "id": "prod_005",
-        "product_id": "prod_005",
-        "title": "Wireless Mouse",
-        "description": "Ergonomic wireless mouse with precision tracking",
-        "price": 29.99,
-        "category_id": "accessories",
-        "seller_id": "seller_003",
-        "images": ["https://images.unsplash.com/photo-1527864550417-7fd91fc51a46?w=300"],
-        "inventory_quantity": 150,
-        "tags": ["accessories", "computer"],
-        "is_featured": False,
-        "status": "active",
-        "view_count": 95,
-        "average_rating": 4.2,
-        "review_count": 18,
-    }
-]
+# No mock data - using production Firestore only
 
 @router.get("")
 async def get_products(
@@ -124,170 +37,39 @@ async def get_products(
     try:
         db = get_db()
         
-        # Use sample data if database is not available
+        # Database is required - no fallback
         if not db:
-            products = SAMPLE_PRODUCTS.copy()
-            
-            # Apply search filter
-            search_query = q or search
-            if search_query:
-                search_lower = search_query.lower()
-                products = [
-                    p for p in products
-                    if search_lower in p.get('title', '').lower() or
-                       search_lower in p.get('description', '').lower()
-                ]
-            
-            # Apply category filter
-            if category_id:
-                products = [p for p in products if p.get('category_id') == category_id]
-            
-            # Apply price filters
-            if min_price is not None:
-                products = [p for p in products if p.get('price', 0) >= min_price]
-            if max_price is not None:
-                products = [p for p in products if p.get('price', 0) <= max_price]
-            
-            # Apply sorting
-            if sort_by == 'price':
-                products.sort(key=lambda x: x.get('price', 0), reverse=(sort_order == 'desc'))
-            elif sort_by == 'view_count':
-                products.sort(key=lambda x: x.get('view_count', 0), reverse=(sort_order == 'desc'))
-            elif sort_by == 'rating':
-                products.sort(key=lambda x: x.get('average_rating', 0), reverse=(sort_order == 'desc'))
-            
-            # Apply pagination
-            total = len(products)
-            products = products[offset:offset + limit]
-            
-            return create_success_response(
-                data={
-                    'products': products,
-                    'total': total,
-                    'limit': limit,
-                    'offset': offset
-                }
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database connection not available"
             )
         
-        # Try to query Firestore, but fall back to sample data if index issues occur
-        try:
-            # Simple query without complex sorting to avoid index issues
-            query = db.collection('products').where('status', '==', 'active').limit(limit)
+        # Query Firestore
+        query = db.collection('products').where('status', '==', 'active').limit(limit)
+        
+        products = []
+        for doc in query.stream():
+            product = doc.to_dict()
+            product['id'] = doc.id
+            product['product_id'] = doc.id
             
-            products = []
-            for doc in query.stream():
-                product = doc.to_dict()
-                product['id'] = doc.id
-                product['product_id'] = doc.id
-                
-                # Apply additional filters that Firestore can't handle
-                if min_price is not None and product.get('price', 0) < min_price:
-                    continue
-                if max_price is not None and product.get('price', 0) > max_price:
-                    continue
-                if tags and not any(tag in product.get('tags', []) for tag in tags):
-                    continue
-                
-                # Apply search filter
-                search_query = q or search
-                if search_query:
-                    search_lower = search_query.lower()
-                    if not (search_lower in product.get('title', '').lower() or
-                            search_lower in product.get('description', '').lower()):
-                        continue
-                
-                products.append(product)
-            
-            # If no products found in Firestore, use sample data
-            if not products:
-                logger.warning("No products found in Firestore, using sample data")
-                products = SAMPLE_PRODUCTS.copy()
-                
-                # Apply search filter
-                search_query = q or search
-                if search_query:
-                    search_lower = search_query.lower()
-                    products = [
-                        p for p in products
-                        if search_lower in p.get('title', '').lower() or
-                           search_lower in p.get('description', '').lower()
-                    ]
-                
-                # Apply category filter
-                if category_id:
-                    products = [p for p in products if p.get('category_id') == category_id]
-                
-                # Apply price filters
-                if min_price is not None:
-                    products = [p for p in products if p.get('price', 0) >= min_price]
-                if max_price is not None:
-                    products = [p for p in products if p.get('price', 0) <= max_price]
-                
-                # Apply sorting
-                if sort_by == 'price':
-                    products.sort(key=lambda x: x.get('price', 0), reverse=(sort_order == 'desc'))
-                elif sort_by == 'view_count':
-                    products.sort(key=lambda x: x.get('view_count', 0), reverse=(sort_order == 'desc'))
-                elif sort_by == 'rating':
-                    products.sort(key=lambda x: x.get('average_rating', 0), reverse=(sort_order == 'desc'))
-                
-                # Apply pagination
-                total = len(products)
-                products = products[offset:offset + limit]
-                
-                return create_success_response(
-                    data={
-                        'products': products,
-                        'total': total,
-                        'limit': limit,
-                        'offset': offset
-                    }
-                )
-                
-        except Exception as firestore_error:
-            logger.warning(f"Firestore query failed, using sample data: {firestore_error}")
-            products = SAMPLE_PRODUCTS.copy()
+            # Apply additional filters that Firestore can't handle
+            if min_price is not None and product.get('price', 0) < min_price:
+                continue
+            if max_price is not None and product.get('price', 0) > max_price:
+                continue
+            if tags and not any(tag in product.get('tags', []) for tag in tags):
+                continue
             
             # Apply search filter
             search_query = q or search
             if search_query:
                 search_lower = search_query.lower()
-                products = [
-                    p for p in products
-                    if search_lower in p.get('title', '').lower() or
-                       search_lower in p.get('description', '').lower()
-                ]
+                if not (search_lower in product.get('title', '').lower() or
+                        search_lower in product.get('description', '').lower()):
+                    continue
             
-            # Apply category filter
-            if category_id:
-                products = [p for p in products if p.get('category_id') == category_id]
-            
-            # Apply price filters
-            if min_price is not None:
-                products = [p for p in products if p.get('price', 0) >= min_price]
-            if max_price is not None:
-                products = [p for p in products if p.get('price', 0) <= max_price]
-            
-            # Apply sorting
-            if sort_by == 'price':
-                products.sort(key=lambda x: x.get('price', 0), reverse=(sort_order == 'desc'))
-            elif sort_by == 'view_count':
-                products.sort(key=lambda x: x.get('view_count', 0), reverse=(sort_order == 'desc'))
-            elif sort_by == 'rating':
-                products.sort(key=lambda x: x.get('average_rating', 0), reverse=(sort_order == 'desc'))
-            
-            # Apply pagination
-            total = len(products)
-            products = products[offset:offset + limit]
-            
-            return create_success_response(
-                data={
-                    'products': products,
-                    'total': total,
-                    'limit': limit,
-                    'offset': offset
-                }
-            )
+            products.append(product)
         
         return create_success_response(
             data={
@@ -315,35 +97,25 @@ async def get_featured_products(
         db = get_db()
         
         if not db:
-            featured = [p for p in SAMPLE_PRODUCTS if p.get('is_featured', False)][:limit]
-            return create_success_response(
-                data={'products': featured}
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database connection not available"
             )
         
-        try:
-            # Simple query to avoid index issues
-            query = db.collection('products').where('status', '==', 'active').limit(limit * 2)  # Get more to filter
+        # Query Firestore for featured products
+        query = db.collection('products').where('status', '==', 'active').limit(limit * 2)
+        
+        products = []
+        for doc in query.stream():
+            product = doc.to_dict()
+            product['id'] = doc.id
+            product['product_id'] = doc.id
             
-            products = []
-            for doc in query.stream():
-                product = doc.to_dict()
-                product['id'] = doc.id
-                product['product_id'] = doc.id
-                
-                # Filter for featured products
-                if product.get('is_featured', False):
-                    products.append(product)
-                    if len(products) >= limit:
-                        break
-            
-            # If no featured products found, use sample data
-            if not products:
-                logger.warning("No featured products found in Firestore, using sample data")
-                products = [p for p in SAMPLE_PRODUCTS if p.get('is_featured', False)][:limit]
-                
-        except Exception as firestore_error:
-            logger.warning(f"Firestore query failed for featured products, using sample data: {firestore_error}")
-            products = [p for p in SAMPLE_PRODUCTS if p.get('is_featured', False)][:limit]
+            # Filter for featured products
+            if product.get('is_featured', False):
+                products.append(product)
+                if len(products) >= limit:
+                    break
         
         return create_success_response(
             data={'products': products}
@@ -365,34 +137,24 @@ async def get_popular_products(
         db = get_db()
         
         if not db:
-            popular = sorted(SAMPLE_PRODUCTS, key=lambda x: x.get('view_count', 0), reverse=True)[:limit]
-            return create_success_response(
-                data={'products': popular}
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database connection not available"
             )
         
-        try:
-            # Simple query to avoid index issues
-            query = db.collection('products').where('status', '==', 'active').limit(limit * 2)  # Get more to sort
-            
-            products = []
-            for doc in query.stream():
-                product = doc.to_dict()
-                product['id'] = doc.id
-                product['product_id'] = doc.id
-                products.append(product)
-            
-            # Sort by view count in Python
-            products.sort(key=lambda x: x.get('view_count', 0), reverse=True)
-            products = products[:limit]
-            
-            # If no products found, use sample data
-            if not products:
-                logger.warning("No products found in Firestore, using sample data")
-                products = sorted(SAMPLE_PRODUCTS, key=lambda x: x.get('view_count', 0), reverse=True)[:limit]
-                
-        except Exception as firestore_error:
-            logger.warning(f"Firestore query failed for popular products, using sample data: {firestore_error}")
-            products = sorted(SAMPLE_PRODUCTS, key=lambda x: x.get('view_count', 0), reverse=True)[:limit]
+        # Query Firestore for popular products
+        query = db.collection('products').where('status', '==', 'active').limit(limit * 2)
+        
+        products = []
+        for doc in query.stream():
+            product = doc.to_dict()
+            product['id'] = doc.id
+            product['product_id'] = doc.id
+            products.append(product)
+        
+        # Sort by view count in Python
+        products.sort(key=lambda x: x.get('view_count', 0), reverse=True)
+        products = products[:limit]
         
         return create_success_response(
             data={'products': products}
@@ -415,19 +177,9 @@ async def search_products(
         db = get_db()
         
         if not db:
-            search_lower = q.lower()
-            results = [
-                p for p in SAMPLE_PRODUCTS
-                if search_lower in p.get('title', '').lower() or
-                   search_lower in p.get('description', '').lower()
-            ][:limit]
-            return create_success_response(
-                data={
-                    'products': results,
-                    'query': q,
-                    'count': len(results)
-                },
-                message=f"Found {len(results)} products"
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Database connection not available"
             )
         
         # Note: For production, use a proper search service like Algolia or ElasticSearch
