@@ -1,8 +1,8 @@
 """Application Settings Configuration using Pydantic"""
 
 from typing import List, Optional
-from pydantic_settings import BaseSettings
-from pydantic import Field, validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator
 import os
 from functools import lru_cache
 
@@ -101,20 +101,21 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
     log_file: str = Field(default="kynora.log", env="LOG_FILE")
     
-    class Config:
-        """Pydantic configuration"""
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
+    # Pydantic v2 settings config
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+    )
         
-    @validator("firebase_private_key", pre=True)
+    @field_validator("firebase_private_key", mode="before")
     def format_firebase_private_key(cls, v):
         """Format Firebase private key properly"""
         if v:
             return v.replace("\\n", "\n")
         return v
     
-    @validator("cors_origins", pre=True)
+    @field_validator("cors_origins", mode="before")
     def parse_cors_origins(cls, v):
         """Parse CORS origins from string if needed"""
         if isinstance(v, str):

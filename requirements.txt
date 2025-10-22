@@ -18,7 +18,7 @@ google-auth-oauthlib==1.2.0
 google-auth-httplib2==0.2.0
 
 # Data Validation & Serialization
-pydantic==2.5.3
+pydantic==2.7.4
 pydantic-settings==2.1.0
 email-validator==2.1.0.post1
 
@@ -67,3 +67,6 @@ autopep8==2.0.4
 # Redis (optional for caching)
 redis==5.0.1
 # Note: aioredis is deprecated, use redis[hiredis] instead
+
+# Process manager for production (optional on Railway)
+gunicorn==22.1.0

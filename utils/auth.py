@@ -251,6 +251,10 @@ async def get_current_user_optional(credentials: Optional[HTTPAuthorizationCrede
         return None
 
 
+# Backward-compatible alias expected by some routers
+async def optional_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False))) -> Optional[TokenData]:
+    return await get_current_user_optional(credentials)
+
 async def require_seller(current_user: TokenData = Depends(get_current_user)) -> TokenData:
     """
     Require seller role
@@ -279,3 +283,4 @@ verify_token = AuthUtils.verify_token
 hash_password = AuthUtils.hash_password
 verify_password = AuthUtils.verify_password
 verify_firebase_token = AuthUtils.verify_firebase_token
+# optional_user is already defined as function above

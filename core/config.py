@@ -8,7 +8,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Firebase settings
-FIREBASE_CREDENTIALS_PATH = os.getenv("FIREBASE_CREDENTIALS_PATH", "serviceAccountKey.json")
+# Support loading Firebase service account from a single env var (useful on Railway)
+FIREBASE_SERVICE_ACCOUNT = os.getenv("FIREBASE_SERVICE_ACCOUNT", None)
+# Default path for service account file; if FIREBASE_SERVICE_ACCOUNT is set we will
+# write it to this path at runtime (e.g. /tmp/serviceAccountKey.json on Linux)
+DEFAULT_FIREBASE_CREDENTIALS_PATH = os.getenv("FIREBASE_CREDENTIALS_PATH", "serviceAccountKey.json")
+FIREBASE_CREDENTIALS_PATH = DEFAULT_FIREBASE_CREDENTIALS_PATH
 FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "kynora-ecommerce")
 
 # API settings

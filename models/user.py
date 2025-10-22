@@ -1,10 +1,10 @@
 """User models and schemas"""
 
 from pydantic import BaseModel, Field, EmailStr, validator
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from datetime import datetime
 from enum import Enum
-from models.base import BaseDocument, BaseResponse
+from models.base import BaseDocument, BaseResponse, PaginatedResponse
 
 
 class UserRole(str, Enum):
@@ -46,52 +46,45 @@ class UserMetadata(BaseModel):
     ip_address: Optional[str] = None
 
 
-    full_name: str
-    display_name: Optional[str] = None
+class User(BaseDocument):
+    """Primary user model matching Firestore documents and API usage"""
+    user_id: Optional[str] = Field(default=None, description="User ID (Firestore document id)")
+    email: Optional[EmailStr] = None
+    # Names
+    name: Optional[str] = None
+    displayName: Optional[str] = None  # Firestore uses displayName
+    display_name: Optional[str] = None  # Accept snake_case from routers
+    # Role & status
     role: UserRole = Field(default=UserRole.CUSTOMER)
+    status: UserStatus = Field(default=UserStatus.ACTIVE)
+    isActive: bool = True
+    email_verified: bool = False
+    # Profile
     avatar: Optional[str] = None
     phone: Optional[str] = None
-    status: UserStatus = Field(default=UserStatus.ACTIVE)
-    email_verified: bool = False
     address: Optional[Address] = None
     preferences: UserPreferences = Field(default_factory=UserPreferences)
-    metadata: UserMetadata = Field(default_factory=UserMetadata)
-    
-    @validator('display_name', always=True)
-    def set_display_name(cls, v, values):
-        """Set display name from name if not provided"""
-        if v is None and 'full_name' in values:
-            return values['full_name'].split()[0] if values['full_name'] else None
-        return v
+    metadata: Optional[UserMetadata] = Field(default_factory=UserMetadata)
+    # Seller/public fields (optional)
+    businessName: Optional[str] = None
+    businessDescription: Optional[str] = None
+    rating: Optional[float] = None
+    totalSales: Optional[int] = None
     
     def to_firestore(self) -> Dict[str, Any]:
         """Convert to Firestore document format"""
-        data = self.dict(exclude={'user_id'})
-        # Convert nested models to dicts
-        if data.get('address'):
-            data['address'] = self.address.dict() if self.address else None
-        if data.get('preferences'):
+        data = self.dict(exclude={'user_id'}, exclude_none=True)
+        # Normalize display name to Firestore's displayName
+        if 'displayName' not in data and data.get('display_name'):
+            data['displayName'] = data['display_name']
+        data.pop('display_name', None)
+        if isinstance(self.address, BaseModel):
+            data['address'] = self.address.dict()
+        if isinstance(self.preferences, BaseModel):
             data['preferences'] = self.preferences.dict()
-        if data.get('metadata'):
+        if isinstance(self.metadata, BaseModel):
             data['metadata'] = self.metadata.dict()
         return data
-
-
-    full_name: str
-    phone: Optional[str] = None
-    
-    @validator('password')
-    def validate_password(cls, v):
-        """Validate password strength"""
-        if len(v) < 8:
-            raise ValueError('Password must be at least 8 characters')
-        if not any(char.isupper() for char in v):
-            raise ValueError('Password must contain at least one uppercase letter')
-        if not any(char.islower() for char in v):
-            raise ValueError('Password must contain at least one lowercase letter')
-        if not any(char.isdigit() for char in v):
-            raise ValueError('Password must contain at least one digit')
-        return v
 
 
 class UserUpdate(BaseModel):
@@ -104,6 +97,14 @@ class UserUpdate(BaseModel):
     preferences: Optional[UserPreferences] = None
 
 
+class UserCreate(BaseModel):
+    """User registration request model"""
+    email: EmailStr
+    password: str
+    name: str
+    phone: Optional[str] = None
+
+
 class UserLogin(BaseModel):
     """User login request model"""
     email: EmailStr
@@ -113,6 +114,11 @@ class UserLogin(BaseModel):
 class UserResponse(BaseResponse):
     """User response model"""
     user: Optional[User] = None
+
+
+class UserListResponse(PaginatedResponse):
+    """User list response with pagination"""
+    users: List[User] = Field(default_factory=list)
 
 
 class TokenData(BaseModel):
