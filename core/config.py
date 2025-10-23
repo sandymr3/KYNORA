@@ -22,7 +22,7 @@ API_VERSION = "2.0.0"
 API_DESCRIPTION = "Full-featured e-commerce backend with Firebase integration"
 
 # CORS settings
-CORS_ORIGINS = ["http://localhost:3000", "http://localhost:3001"]
+CORS_ORIGINS = ["http://localhost:3000","kynoraa.vercel.app", "http://localhost:3001"]
 
 # Security settings
 SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-here-change-in-production")
