@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     # Server
     host: str = Field(default="0.0.0.0", env="HOST")
     port: int = Field(default=8000, env="PORT")
-    api_base_url: str = Field(default="http://localhost:8000", env="API_BASE_URL")
+    api_base_url: str = Field(default="https://kynora-production.up.railway.app", env="API_BASE_URL")
     frontend_url: str = Field(default="http://localhost:3000", env="FRONTEND_URL")
     
     # Firebase
